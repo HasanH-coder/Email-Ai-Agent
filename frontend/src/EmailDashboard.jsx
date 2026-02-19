@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 
 // --- Mock Data ---
 const gmailEmails = [
@@ -146,6 +146,14 @@ function DraftIcon({ className }) {
   )
 }
 
+function SentIcon({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.27 3.13a59.76 59.76 0 0 1 18.22 8.87 59.77 59.77 0 0 1-18.22 8.88L6 12Zm0 0h7.5" />
+    </svg>
+  )
+}
+
 function SettingsIcon({ className }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -244,6 +252,76 @@ function CheckIcon({ className }) {
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
     </svg>
+  )
+}
+
+function ImageIcon({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75V6.75A2.25 2.25 0 014.5 4.5h15a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-15A2.25 2.25 0 012.25 15.75z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="m3.75 14.25 4.5-4.5a1.5 1.5 0 012.121 0l4.5 4.5" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="m14.25 12.75 1.5-1.5a1.5 1.5 0 012.121 0l2.379 2.379" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 8.25h.008v.008H8.25V8.25z" />
+    </svg>
+  )
+}
+
+function FolderIcon({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 7.5A2.25 2.25 0 016 5.25h4.19c.597 0 1.17.237 1.591.659l.81.81c.422.422.994.659 1.591.659H18a2.25 2.25 0 012.25 2.25v6.75A2.25 2.25 0 0118 18.75H6a2.25 2.25 0 01-2.25-2.25V7.5z" />
+    </svg>
+  )
+}
+
+function AttachmentMenu({ isOpen, anchorRef, onClose, onSelect }) {
+  const menuRef = useRef(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    function handleOutsideClick(e) {
+      if (!menuRef.current || !anchorRef?.current) return
+      if (menuRef.current.contains(e.target) || anchorRef.current.contains(e.target)) return
+      onClose()
+    }
+    document.addEventListener('mousedown', handleOutsideClick)
+    return () => document.removeEventListener('mousedown', handleOutsideClick)
+  }, [isOpen, onClose, anchorRef])
+
+  if (!isOpen || !anchorRef?.current) return null
+
+  const rect = anchorRef.current.getBoundingClientRect()
+
+  return (
+    <div
+      ref={menuRef}
+      className="fixed z-50 min-w-56 rounded-xl border border-slate-200 bg-white shadow-xl p-2"
+      style={{ top: rect.top - 166, left: rect.left }}
+      role="menu"
+      aria-label="Attachment options"
+    >
+      <button
+        onClick={() => onSelect('photos')}
+        className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-slate-700 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer"
+      >
+        <ImageIcon className="w-4 h-4 text-slate-500" />
+        Photos and videos
+      </button>
+      <button
+        onClick={() => onSelect('files')}
+        className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-slate-700 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer"
+      >
+        <FolderIcon className="w-4 h-4 text-slate-500" />
+        Other files
+      </button>
+      <button
+        onClick={() => onSelect('attachment')}
+        className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-slate-700 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer"
+      >
+        <PaperclipIcon className="w-4 h-4 text-slate-500" />
+        Traditional attachment
+      </button>
+    </div>
   )
 }
 
@@ -391,7 +469,7 @@ function ConnectModal({ isOpen, provider, onCancel, onConnect }) {
 
 
 // --- Compose Modal (also used for editing drafts) ---
-function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, onSaveDraft }) {
+function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, onSaveDraft, onSendEmail }) {
   const [to, setTo] = useState('')
   const [cc, setCc] = useState('')
   const [subject, setSubject] = useState('')
@@ -402,32 +480,63 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
   const [editMode, setEditMode] = useState('manual') // manual | ai
   const [aiEditPrompt, setAiEditPrompt] = useState('')
   const [manualBody, setManualBody] = useState('')
+  const [composeMessage, setComposeMessage] = useState('')
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const backdropRef = useRef(null)
+  const attachmentButtonRef = useRef(null)
   const isEditing = !!initialData
-  const initialized = useRef(false)
+  const hasRecipient = to.trim().length > 0
+  const hasPrompt = aiPrompt.trim().length > 0
+  const canGenerateInNewEmail = hasRecipient && hasPrompt
+  const canGenerateInEditMode = hasRecipient
+  const canGenerate = isEditing ? canGenerateInEditMode : canGenerateInNewEmail
 
-  // Initialize with draft data when opened
-  if (isOpen && initialData && !initialized.current) {
-    initialized.current = true
-    setTo(initialData.to || '')
-    setSubject(initialData.subject || '')
-    setManualBody(initialData.body || '')
-    setAiPrompt(initialData.body || '')
-    setEditMode('manual')
-    setStep('compose')
-  }
-  if (!isOpen && initialized.current) {
-    initialized.current = false
-  }
+  useEffect(() => {
+    if (!isOpen) return
+    if (initialData) {
+      setTo(initialData.to || '')
+      setCc('')
+      setSubject(initialData.subject || '')
+      setManualBody(initialData.body || '')
+      setAiPrompt(initialData.body || '')
+      setEditMode('manual')
+      setStep('compose')
+      setGeneratedBody('')
+      setAiEditPrompt('')
+      setComposeMessage('')
+    } else {
+      setTo('')
+      setCc('')
+      setSubject('')
+      setAiPrompt('')
+      setAttachments([])
+      setStep('compose')
+      setGeneratedBody('')
+      setEditMode('manual')
+      setAiEditPrompt('')
+      setManualBody('')
+      setComposeMessage('')
+    }
+  }, [isOpen, initialData])
 
   function handleBackdrop(e) {
     if (e.target === backdropRef.current) handleClose()
   }
 
-  function handleAddAttachment() {
-    const names = ['report.pdf', 'presentation.pptx', 'data.xlsx', 'image.png', 'notes.docx']
+  function handleAddAttachment(type = 'attachment') {
+    const namesByType = {
+      photos: ['photo-1.jpg', 'vacation.mp4', 'portrait.png'],
+      files: ['report.pdf', 'presentation.pptx', 'data.xlsx'],
+      attachment: ['notes.docx', 'attachment.zip', 'summary.txt'],
+    }
+    const names = namesByType[type] || namesByType.attachment
     const name = names[attachments.length % names.length]
     setAttachments((prev) => [...prev, { id: Date.now(), name }])
+  }
+
+  function handleAttachmentOptionSelect(option) {
+    handleAddAttachment(option)
+    setAttachmentMenuOpen(false)
   }
 
   function handleRemoveAttachment(id) {
@@ -439,21 +548,57 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     return '\n\n' + signature
   }
 
+  function buildGeneratedBodyFromPrompt(promptText) {
+    return `Dear recipient,\n\nThank you for your message. I wanted to follow up regarding ${promptText.toLowerCase().slice(0, 80)}.\n\nI have reviewed the details and would like to share my thoughts:\n\n1. The proposed timeline looks reasonable and achievable.\n2. I suggest we schedule a follow-up meeting to discuss the specifics.\n3. Please let me know if you need any additional information from my end.\n\nI look forward to hearing from you.${getSignatureText() || '\n\nBest regards'}`
+  }
+
   function handleGenerate() {
+    if (!canGenerate) return
     const prompt = (isEditing && editMode === 'manual' ? manualBody : aiPrompt).trim() || subject || 'a professional email'
-    const body = `Dear recipient,\n\nThank you for your message. I wanted to follow up regarding ${prompt.toLowerCase().slice(0, 80)}.\n\nI have reviewed the details and would like to share my thoughts:\n\n1. The proposed timeline looks reasonable and achievable.\n2. I suggest we schedule a follow-up meeting to discuss the specifics.\n3. Please let me know if you need any additional information from my end.\n\nI look forward to hearing from you.${getSignatureText() || '\n\nBest regards'}`
+    const body = buildGeneratedBodyFromPrompt(prompt)
     setGeneratedBody(body)
     setStep('review')
+    setComposeMessage('')
+  }
+
+  function handleGenerateAndSend() {
+    if (!canGenerateInNewEmail) return
+    const prompt = (isEditing && editMode === 'manual' ? manualBody : aiPrompt).trim() || subject || 'a professional email'
+    const body = buildGeneratedBodyFromPrompt(prompt)
+    if (onSendEmail) {
+      onSendEmail({
+        to,
+        cc,
+        subject,
+        body,
+        draftId: isEditing ? initialData?.id : null,
+      })
+    }
+    handleClose()
   }
 
   function handleAiRewrite() {
+    if (!hasRecipient) {
+      setComposeMessage('Enter a recipient email in the To field first.')
+      return
+    }
     const prompt = aiEditPrompt.trim() || 'more professional and concise'
     const body = `Dear recipient,\n\nI am writing to follow up on our previous correspondence. After careful consideration, I would like to address the following points:\n\nRegarding "${prompt}":\n\n1. I have thoroughly reviewed the materials and believe we are well-positioned to move forward.\n2. Our team has prepared a comprehensive analysis that addresses the key concerns.\n3. I would appreciate the opportunity to discuss this further at your earliest convenience.\n\nPlease do not hesitate to reach out if you have any questions.${getSignatureText() || '\n\nBest regards'}`
     setManualBody(body)
     setAiEditPrompt('')
+    setComposeMessage('')
   }
 
   function handleSend() {
+    if (onSendEmail) {
+      onSendEmail({
+        to,
+        cc,
+        subject,
+        body: generatedBody || manualBody,
+        draftId: isEditing ? initialData?.id : null,
+      })
+    }
     handleClose()
   }
 
@@ -475,6 +620,8 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     setEditMode('manual')
     setAiEditPrompt('')
     setManualBody('')
+    setComposeMessage('')
+    setAttachmentMenuOpen(false)
   }
 
   if (!isOpen) return null
@@ -488,7 +635,7 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
       aria-modal="true"
       aria-label={isEditing ? 'Edit draft' : 'Compose email'}
     >
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden animate-[fadeScaleIn_0.15s_ease-out]">
+      <div className={`bg-white rounded-2xl shadow-2xl w-full ${step === 'review' ? 'max-w-5xl' : 'max-w-4xl'} max-h-[94vh] flex flex-col overflow-hidden animate-[fadeScaleIn_0.15s_ease-out]`}>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 shrink-0">
           <h3 className="text-base font-bold text-slate-900">
@@ -567,7 +714,7 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
 
                   {editMode === 'manual' ? (
                     <textarea
-                      rows={6}
+                      rows={16}
                       value={manualBody}
                       onChange={(e) => setManualBody(e.target.value)}
                       placeholder="Write your email body..."
@@ -590,7 +737,7 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-indigo-100 rounded-lg hover:bg-indigo-200 transition-colors cursor-pointer"
                       >
                         <SparklesIcon className="w-3.5 h-3.5" />
-                        Rewrite Draft
+                        Generate from Prompt
                       </button>
                     </div>
                   )}
@@ -603,7 +750,7 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
                   <label htmlFor="compose-prompt" className="block text-xs font-medium text-slate-500 mb-1">Tell the AI what to write</label>
                   <textarea
                     id="compose-prompt"
-                    rows={4}
+                    rows={12}
                     value={aiPrompt}
                     onChange={(e) => setAiPrompt(e.target.value)}
                     placeholder="e.g. Write a follow-up email about the Q1 budget proposal..."
@@ -635,7 +782,8 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
             {/* Actions */}
             <div className="flex items-center justify-between mt-5">
               <button
-                onClick={handleAddAttachment}
+                ref={attachmentButtonRef}
+                onClick={() => setAttachmentMenuOpen((prev) => !prev)}
                 className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors cursor-pointer"
               >
                 <PaperclipIcon className="w-4 h-4" />
@@ -661,13 +809,48 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
                 )}
                 <button
                   onClick={handleGenerate}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors cursor-pointer"
+                  disabled={!canGenerate}
+                  className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl transition-colors ${
+                    canGenerate
+                      ? 'text-white bg-indigo-600 hover:bg-indigo-700 cursor-pointer'
+                      : 'text-slate-400 bg-slate-200 cursor-not-allowed'
+                  }`}
                 >
                   <SparklesIcon className="w-4 h-4" />
                   Generate with AI
                 </button>
+                {!isEditing && (
+                  <button
+                    onClick={handleGenerateAndSend}
+                    disabled={!canGenerateInNewEmail}
+                    className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl transition-colors ${
+                      canGenerateInNewEmail
+                        ? 'text-white bg-slate-700 hover:bg-slate-800 cursor-pointer'
+                        : 'text-slate-400 bg-slate-200 cursor-not-allowed'
+                    }`}
+                  >
+                    <SendIcon className="w-4 h-4" />
+                    Generate & Send
+                  </button>
+                )}
               </div>
             </div>
+            {!canGenerateInNewEmail && !isEditing && (
+              <p className="mt-3 text-xs font-medium text-red-600">
+                Enter a recipient in To and a prompt to enable Generate and Generate & Send.
+              </p>
+            )}
+            {composeMessage && (
+              <p className="mt-3 text-xs font-medium text-red-600">
+                {composeMessage}
+              </p>
+            )}
+            <AttachmentMenu
+              isOpen={attachmentMenuOpen}
+              anchorRef={attachmentButtonRef}
+              onClose={() => setAttachmentMenuOpen(false)}
+              onSelect={handleAttachmentOptionSelect}
+            />
           </div>
         ) : (
           /* Review step */
@@ -700,8 +883,48 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
                 ))}
               </div>
             )}
-            <div className="bg-slate-50 rounded-xl p-4 mb-5 max-h-64 overflow-y-auto">
-              <pre className="text-sm text-slate-800 whitespace-pre-wrap font-sans leading-relaxed">{generatedBody}</pre>
+            <div className="bg-slate-50 rounded-xl p-4 mb-4">
+              <textarea
+                rows={18}
+                value={generatedBody}
+                onChange={(e) => setGeneratedBody(e.target.value)}
+                className="w-full text-sm text-slate-800 whitespace-pre-wrap font-sans leading-relaxed bg-transparent focus:outline-none resize-none"
+              />
+            </div>
+            <div className="mb-5">
+              <label htmlFor="review-regenerate-prompt" className="block text-xs font-medium text-slate-500 mb-1">
+                Modify with a new prompt
+              </label>
+              <div className="flex items-start gap-2">
+                <textarea
+                  id="review-regenerate-prompt"
+                  rows={3}
+                  value={aiPrompt}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  placeholder="Type a new prompt, then click Regenerate..."
+                  className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                />
+                <button
+                  disabled={!canGenerateInNewEmail}
+                  onClick={() => {
+                    if (!canGenerateInNewEmail) {
+                      setComposeMessage('Enter a recipient in To and a prompt before regenerating.')
+                      return
+                    }
+                    const body = buildGeneratedBodyFromPrompt(aiPrompt.trim())
+                    setGeneratedBody(body)
+                    setComposeMessage('')
+                  }}
+                  className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl transition-colors ${
+                    canGenerateInNewEmail
+                      ? 'text-white bg-indigo-600 hover:bg-indigo-700 cursor-pointer'
+                      : 'text-slate-400 bg-slate-200 cursor-not-allowed'
+                  }`}
+                >
+                  <SparklesIcon className="w-4 h-4" />
+                  Regenerate
+                </button>
+              </div>
             </div>
             <div className="flex items-center gap-2 justify-end">
               <button
@@ -719,6 +942,9 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
                 Send Email
               </button>
             </div>
+            {composeMessage && (
+              <p className="mt-3 text-xs font-medium text-red-600">{composeMessage}</p>
+            )}
           </div>
         )}
       </div>
@@ -732,6 +958,9 @@ export default function EmailDashboard({ onSignOut }) {
   const [gmailEmailState, setGmailEmails] = useState(gmailEmails)
   const [outlookEmailState, setOutlookEmails] = useState(outlookEmails)
   const [drafts, setDrafts] = useState(initialDrafts)
+  const [sentEmails, setSentEmails] = useState([])
+  const [emailThreads, setEmailThreads] = useState({})
+  const [selectedSentEmailId, setSelectedSentEmailId] = useState(null)
   const [selectedEmailId, setSelectedEmailId] = useState(gmailEmails[0].id)
   const [activeFilter, setActiveFilter] = useState('all')
   const [activePage, setActivePage] = useState('inbox')
@@ -750,6 +979,8 @@ export default function EmailDashboard({ onSignOut }) {
 
   // Connect modal state
   const [connectModal, setConnectModal] = useState({ open: false, provider: null, fromInbox: false })
+  const [disconnectModal, setDisconnectModal] = useState({ open: false, provider: null })
+  const [directSendModal, setDirectSendModal] = useState({ open: false, payload: null })
 
   // Draft editing
   const [editingDraft, setEditingDraft] = useState(null)
@@ -757,8 +988,15 @@ export default function EmailDashboard({ onSignOut }) {
 
   // AI assistant state
   const [aiPrompt, setAiPrompt] = useState('')
+  const [aiGeneratedEmail, setAiGeneratedEmail] = useState('')
+  const [aiGeneratedMeta, setAiGeneratedMeta] = useState(null)
+  const [aiActionMessage, setAiActionMessage] = useState('')
+  const [aiActionTone, setAiActionTone] = useState('error')
 
-  const currentEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
+  const isActiveProviderConnected = connectedAccounts[activeProvider]
+  const currentEmails = isActiveProviderConnected
+    ? (activeProvider === 'gmail' ? gmailEmailState : outlookEmailState)
+    : []
   const setCurrentEmails = activeProvider === 'gmail' ? setGmailEmails : setOutlookEmails
   const selectedEmail = currentEmails.find((e) => e.id === selectedEmailId) || currentEmails[0]
 
@@ -770,6 +1008,11 @@ export default function EmailDashboard({ onSignOut }) {
     setSelectedEmailId(id)
     setCurrentEmails((prev) => prev.map((e) => (e.id === id ? { ...e, read: true } : e)))
     setMobileShowDetail(true)
+    setAiPrompt('')
+    setAiGeneratedEmail('')
+    setAiGeneratedMeta(null)
+    setAiActionMessage('')
+    setAiActionTone('error')
   }
 
   function handleToggleStar(id, e) {
@@ -848,11 +1091,213 @@ export default function EmailDashboard({ onSignOut }) {
     setEditingDraft(null)
   }
 
+  function handleSendEmail(data) {
+    const now = new Date()
+    const provider = data.provider || activeProvider
+    const threadRootId = data.threadRootId || data.replyToId || null
+    const sentEmail = {
+      id: 's' + now.getTime(),
+      to: (data.to || '').trim() || 'recipient@example.com',
+      cc: (data.cc || '').trim(),
+      subject: (data.subject || '').trim() || '(No Subject)',
+      body: (data.body || '').trim(),
+      provider,
+      threadRootId,
+      replyToId: data.replyToId || null,
+      time: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    }
+    setSentEmails((prev) => [sentEmail, ...prev])
+    setSelectedSentEmailId(sentEmail.id)
+
+    const inboxEmail = {
+      id: now.getTime(),
+      sender: 'You',
+      email: connectedEmails[provider] || 'you@example.com',
+      subject: sentEmail.subject,
+      preview: sentEmail.body.slice(0, 110),
+      body: sentEmail.body,
+      time: now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+      date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      read: true,
+      starred: false,
+      avatar: 'U',
+      avatarColor: 'bg-indigo-500',
+      provider,
+      threadRootId,
+      replyToId: data.replyToId || null,
+    }
+
+    if (provider === 'gmail') {
+      setGmailEmails((prev) => [inboxEmail, ...prev])
+    } else {
+      setOutlookEmails((prev) => [inboxEmail, ...prev])
+    }
+
+    if (threadRootId) {
+      const threadReply = {
+        id: inboxEmail.id,
+        from: 'You',
+        to: sentEmail.to,
+        body: sentEmail.body,
+        date: inboxEmail.date,
+        time: inboxEmail.time,
+      }
+      setEmailThreads((prev) => ({
+        ...prev,
+        [threadRootId]: [...(prev[threadRootId] || []), threadReply],
+      }))
+    }
+
+    if (data.draftId) {
+      setDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
+    }
+  }
+
+  function buildInboxReply(promptText) {
+    if (!selectedEmail) return null
+    const generatedReply = `Hi ${selectedEmail.sender.split(' ')[0]},\n\nThanks for your email. I am following up regarding ${promptText}.\n\nI reviewed everything and we can move forward. Let me know if you want me to share more details.\n\nBest regards`
+    const body = effectiveSignature ? `${generatedReply}\n\n${effectiveSignature}` : generatedReply
+    return {
+      to: selectedEmail.email,
+      subject: `Re: ${selectedEmail.subject}`,
+      body,
+      provider: selectedEmail.provider || activeProvider,
+      replyToId: selectedEmail.id,
+      threadRootId: selectedEmail.threadRootId || selectedEmail.id,
+    }
+  }
+
+  function saveDraftFromGeneratedEmail(payload) {
+    const now = new Date()
+    const draft = {
+      id: 'd' + now.getTime(),
+      to: payload.to,
+      subject: payload.subject,
+      body: payload.body,
+      time: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    }
+    setDrafts((prev) => [draft, ...prev])
+    return draft.id
+  }
+
+  function handleInboxGenerate() {
+    if (!aiPrompt.trim()) {
+      setAiActionMessage('Please type a prompt first before you can generate or send the email.')
+      setAiActionTone('error')
+      return
+    }
+    if (!selectedEmail) {
+      setAiActionMessage('Please select an email first.')
+      setAiActionTone('error')
+      return
+    }
+    const payload = buildInboxReply(aiPrompt.trim())
+    if (!payload) return
+
+    const draftId = saveDraftFromGeneratedEmail(payload)
+    setAiGeneratedEmail(payload.body)
+    setAiGeneratedMeta({
+      to: payload.to,
+      subject: payload.subject,
+      provider: payload.provider,
+      replyToId: payload.replyToId,
+      threadRootId: payload.threadRootId,
+      draftId,
+    })
+    setAiActionMessage('Email generated and saved to Drafts.')
+    setAiActionTone('success')
+  }
+
+  function handleInboxPromptChange(value) {
+    setAiPrompt(value)
+    if (aiActionMessage) {
+      setAiActionMessage('')
+      setAiActionTone('error')
+    }
+  }
+
+  function handleGeneratedEmailChange(value) {
+    setAiGeneratedEmail(value)
+    if (aiActionMessage) {
+      setAiActionMessage('')
+      setAiActionTone('error')
+    }
+  }
+
+  function handleRequestDirectSend() {
+    let payload = null
+
+    if (aiGeneratedEmail.trim() && aiGeneratedMeta) {
+      payload = {
+        to: aiGeneratedMeta.to,
+        subject: aiGeneratedMeta.subject,
+        body: aiGeneratedEmail.trim(),
+        provider: aiGeneratedMeta.provider,
+        replyToId: aiGeneratedMeta.replyToId,
+        threadRootId: aiGeneratedMeta.threadRootId,
+        draftId: aiGeneratedMeta.draftId || null,
+      }
+    } else {
+      const prompt = aiPrompt.trim()
+      if (!prompt) {
+        setAiActionMessage('Please type a prompt first before you can generate or send the email.')
+        setAiActionTone('error')
+        return
+      }
+      if (!selectedEmail) {
+        setAiActionMessage('Please select an email first.')
+        setAiActionTone('error')
+        return
+      }
+      payload = buildInboxReply(prompt)
+    }
+
+    if (!payload) {
+      setAiActionMessage('Please type a prompt first before you can generate or send the email.')
+      setAiActionTone('error')
+      return
+    }
+
+    setAiActionMessage('')
+
+    setDirectSendModal({
+      open: true,
+      payload,
+    })
+  }
+
+  function handleSendGeneratedFromExpanded() {
+    if (!aiGeneratedEmail.trim() || !aiGeneratedMeta) {
+      setAiActionMessage('Generate an email first before sending.')
+      setAiActionTone('error')
+      return
+    }
+
+    handleSendEmail({
+      to: aiGeneratedMeta.to,
+      subject: aiGeneratedMeta.subject,
+      body: aiGeneratedEmail.trim(),
+      provider: aiGeneratedMeta.provider,
+      replyToId: aiGeneratedMeta.replyToId,
+      threadRootId: aiGeneratedMeta.threadRootId,
+      draftId: aiGeneratedMeta.draftId || null,
+    })
+
+    setAiPrompt('')
+    setAiGeneratedEmail('')
+    setAiGeneratedMeta(null)
+    setAiActionMessage('Email sent.')
+    setAiActionTone('success')
+  }
+
   const filteredEmails = getFilteredEmails()
+  const selectedThreadRootId = selectedEmail ? (selectedEmail.threadRootId || selectedEmail.id) : null
+  const selectedThreadReplies = selectedThreadRootId ? (emailThreads[selectedThreadRootId] || []) : []
 
   const navItems = [
     { id: 'inbox', label: 'Inbox', icon: InboxIcon, badge: totalUnread },
     { id: 'drafts', label: 'Drafts', icon: DraftIcon, badge: drafts.length },
+    { id: 'sent', label: 'Sent', icon: SentIcon, badge: sentEmails.length },
     { id: 'settings', label: 'Settings', icon: SettingsIcon },
   ]
 
@@ -987,8 +1432,13 @@ export default function EmailDashboard({ onSignOut }) {
               setActiveFilter={setActiveFilter}
               onSelectEmail={handleSelectEmail}
               onToggleStar={handleToggleStar}
+              threadReplies={selectedThreadReplies}
               aiPrompt={aiPrompt}
-              setAiPrompt={setAiPrompt}
+              setAiPrompt={handleInboxPromptChange}
+              aiGeneratedEmail={aiGeneratedEmail}
+              setAiGeneratedEmail={handleGeneratedEmailChange}
+              aiActionMessage={aiActionMessage}
+              aiActionTone={aiActionTone}
               signature={effectiveSignature}
               mobileShowDetail={mobileShowDetail}
               setMobileShowDetail={setMobileShowDetail}
@@ -997,6 +1447,9 @@ export default function EmailDashboard({ onSignOut }) {
               gmailUnread={gmailUnread}
               outlookUnread={outlookUnread}
               connectedAccounts={connectedAccounts}
+              onGenerateRequest={handleInboxGenerate}
+              onDirectSendRequest={handleRequestDirectSend}
+              onSendGeneratedRequest={handleSendGeneratedFromExpanded}
             />
           )}
           {activePage === 'drafts' && (
@@ -1018,7 +1471,16 @@ export default function EmailDashboard({ onSignOut }) {
               connectedAccounts={connectedAccounts}
               connectedEmails={connectedEmails}
               onConnectRequest={(provider) => setConnectModal({ open: true, provider, fromInbox: false })}
-              onDisconnect={handleDisconnect}
+              onDisconnect={(provider) => setDisconnectModal({ open: true, provider })}
+            />
+          )}
+          {activePage === 'sent' && (
+            <SentPage
+              sentEmails={sentEmails}
+              selectedSentEmailId={selectedSentEmailId}
+              onSelectSentEmail={setSelectedSentEmailId}
+              gmailEmails={gmailEmailState}
+              outlookEmails={outlookEmailState}
             />
           )}
         </div>
@@ -1048,6 +1510,41 @@ export default function EmailDashboard({ onSignOut }) {
         onConfirm={() => handleDeleteDraft(deletingDraftId)}
       />
 
+      <ConfirmModal
+        isOpen={disconnectModal.open}
+        title="Disconnect account?"
+        message={`Are you sure you want to disconnect ${
+          disconnectModal.provider === 'gmail' ? 'Gmail' : disconnectModal.provider === 'outlook' ? 'Outlook' : 'this account'
+        }?`}
+        confirmLabel="Disconnect"
+        confirmClass="text-white bg-red-600 hover:bg-red-700"
+        onCancel={() => setDisconnectModal({ open: false, provider: null })}
+        onConfirm={() => {
+          if (disconnectModal.provider) handleDisconnect(disconnectModal.provider)
+          setDisconnectModal({ open: false, provider: null })
+        }}
+      />
+
+      <ConfirmModal
+        isOpen={directSendModal.open}
+        title="Send directly?"
+        message="Are you sure you want to send this email directly without reviewing or viewing it first?"
+        confirmLabel="Send Now"
+        confirmClass="text-white bg-indigo-600 hover:bg-indigo-700"
+        onCancel={() => setDirectSendModal({ open: false, payload: null })}
+        onConfirm={() => {
+          if (directSendModal.payload) {
+            handleSendEmail(directSendModal.payload)
+            setAiPrompt('')
+            setAiGeneratedEmail('')
+            setAiGeneratedMeta(null)
+            setAiActionMessage('')
+            setAiActionTone('error')
+          }
+          setDirectSendModal({ open: false, payload: null })
+        }}
+      />
+
       <ComposeModal
         isOpen={showComposeModal}
         onClose={() => {
@@ -1058,6 +1555,7 @@ export default function EmailDashboard({ onSignOut }) {
         useSignature={useSignature}
         initialData={editingDraft}
         onSaveDraft={handleSaveDraft}
+        onSendEmail={handleSendEmail}
       />
 
       <ConnectModal
@@ -1087,8 +1585,13 @@ function InboxPage({
   setActiveFilter,
   onSelectEmail,
   onToggleStar,
+  threadReplies,
   aiPrompt,
   setAiPrompt,
+  aiGeneratedEmail,
+  setAiGeneratedEmail,
+  aiActionMessage,
+  aiActionTone,
   signature,
   mobileShowDetail,
   setMobileShowDetail,
@@ -1097,7 +1600,12 @@ function InboxPage({
   gmailUnread,
   outlookUnread,
   connectedAccounts,
+  onGenerateRequest,
+  onDirectSendRequest,
+  onSendGeneratedRequest,
 }) {
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
+  const attachmentButtonRef = useRef(null)
   const filters = [
     { id: 'all', label: 'All' },
     { id: 'unread', label: 'Unread' },
@@ -1271,6 +1779,26 @@ function InboxPage({
               <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
                 {selectedEmail.body}
               </pre>
+              {threadReplies.length > 0 && (
+                <div className="mt-6 space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Thread Replies</p>
+                  {threadReplies.map((reply) => (
+                    <div
+                      key={reply.id}
+                      className="rounded-xl border border-indigo-100 bg-indigo-50/40 px-4 py-3"
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <p className="text-xs font-semibold text-indigo-700">{reply.from}</p>
+                        <p className="text-xs text-slate-400">{reply.date} · {reply.time}</p>
+                      </div>
+                      <p className="text-xs text-slate-500 mb-2">To: {reply.to}</p>
+                      <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
+                        {reply.body}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* AI Assistant - sticky at bottom */}
@@ -1283,27 +1811,68 @@ function InboxPage({
                 value={aiPrompt}
                 onChange={(e) => setAiPrompt(e.target.value)}
                 rows={2}
-                placeholder="Tell the AI how to reply..."
+                placeholder={aiGeneratedEmail ? 'Send a new prompt to regenerate this email...' : 'Tell the AI how to reply...'}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
               />
+              {aiGeneratedEmail && (
+                <div className="mt-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xs font-semibold text-slate-600">Generated Email (Editable)</span>
+                  </div>
+                  <textarea
+                    value={aiGeneratedEmail}
+                    onChange={(e) => setAiGeneratedEmail(e.target.value)}
+                    rows={12}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                  />
+                  <div className="flex justify-end mt-2">
+                    <button
+                      onClick={onSendGeneratedRequest}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors cursor-pointer"
+                    >
+                      <SendIcon className="w-4 h-4" />
+                      Send
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between mt-2">
                 <button
+                  ref={attachmentButtonRef}
+                  onClick={() => setAttachmentMenuOpen((prev) => !prev)}
                   className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
                   aria-label="Attach file"
                 >
                   <PaperclipIcon className="w-4 h-4" />
                 </button>
                 <div className="flex items-center gap-2">
-                  <button className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-indigo-100 rounded-lg hover:bg-indigo-200 transition-colors cursor-pointer">
+                  <button
+                    onClick={onGenerateRequest}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-purple-600 rounded-lg hover:bg-purple-700 transition-colors cursor-pointer"
+                  >
                     <SparklesIcon className="w-3.5 h-3.5" />
                     Generate
                   </button>
-                  <button className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors cursor-pointer">
+                  <button
+                    onClick={onDirectSendRequest}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-200 rounded-lg hover:bg-slate-300 transition-colors cursor-pointer"
+                  >
                     <SendIcon className="w-3.5 h-3.5" />
                     {'Generate & Send'}
                   </button>
                 </div>
               </div>
+              {aiActionMessage && (
+                <p className={`mt-2 text-xs font-medium ${aiActionTone === 'success' ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {aiActionMessage}
+                </p>
+              )}
+              <AttachmentMenu
+                isOpen={attachmentMenuOpen}
+                anchorRef={attachmentButtonRef}
+                onClose={() => setAttachmentMenuOpen(false)}
+                onSelect={() => setAttachmentMenuOpen(false)}
+              />
             </div>
           </>
         ) : (
@@ -1372,6 +1941,93 @@ function DraftsPage({ drafts, onDeleteRequest, onEditRequest }) {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEmails, outlookEmails }) {
+  const selectedSentEmail = sentEmails.find((email) => email.id === selectedSentEmailId) || sentEmails[0]
+  const allProviderEmails = [...gmailEmails, ...outlookEmails]
+  const relatedEmailId = selectedSentEmail ? (selectedSentEmail.replyToId || selectedSentEmail.threadRootId) : null
+  const repliedToEmail = relatedEmailId
+    ? allProviderEmails.find((email) => String(email.id) === String(relatedEmailId))
+    : null
+
+  return (
+    <div className="h-full bg-white flex">
+      <div className="w-full md:w-80 lg:w-[340px] border-r border-slate-200 flex flex-col shrink-0">
+        <div className="px-4 py-4 border-b border-slate-100">
+          <div className="flex items-center gap-3">
+            <SentIcon className="w-5 h-5 text-slate-400" />
+            <h2 className="text-lg font-bold text-slate-900">Sent</h2>
+            <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+              {sentEmails.length}
+            </span>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {sentEmails.length === 0 ? (
+            <div className="text-center py-16 text-slate-400">
+              <SentIcon className="w-10 h-10 mx-auto mb-3" />
+              <p className="text-sm font-medium">No sent emails yet</p>
+            </div>
+          ) : (
+            sentEmails.map((email) => (
+              <button
+                key={email.id}
+                onClick={() => onSelectSentEmail(email.id)}
+                className={`w-full text-left px-3.5 py-2.5 border-b border-slate-100 transition-colors cursor-pointer ${
+                  selectedSentEmail && selectedSentEmail.id === email.id
+                    ? 'bg-indigo-50/70'
+                    : 'hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-sm font-semibold text-slate-900 truncate">To: {email.to}</p>
+                  <span className="text-xs text-slate-400 shrink-0 ml-3">{email.time}</span>
+                </div>
+                <p className="text-sm font-medium text-slate-700 truncate">{email.subject}</p>
+                <p className="text-xs text-slate-500 truncate">{email.body}</p>
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="flex-1 min-w-0 overflow-y-auto">
+        {selectedSentEmail ? (
+          <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
+            <div className="rounded-xl border border-slate-200 p-5">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Sent Email</p>
+              <p className="text-xs text-slate-500 mb-1">To: {selectedSentEmail.to}</p>
+              <p className="text-sm font-semibold text-slate-900 mb-2">{selectedSentEmail.subject}</p>
+              <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
+                {selectedSentEmail.body}
+              </pre>
+            </div>
+
+            {repliedToEmail && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Replied To</p>
+                <p className="text-xs text-slate-500 mb-1">
+                  From: {repliedToEmail.sender} ({repliedToEmail.email})
+                </p>
+                <p className="text-sm font-semibold text-slate-900 mb-2">{repliedToEmail.subject}</p>
+                <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
+                  {repliedToEmail.body}
+                </pre>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="h-full flex items-center justify-center text-slate-400">
+            <div className="text-center">
+              <SentIcon className="w-10 h-10 mx-auto mb-3" />
+              <p className="text-sm font-medium">Select a sent email to view details</p>
+            </div>
           </div>
         )}
       </div>
