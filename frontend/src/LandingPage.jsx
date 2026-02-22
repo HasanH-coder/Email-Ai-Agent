@@ -31,7 +31,7 @@ const features = [
   },
 ]
 
-export default function LandingPage({ onAuthSuccess }) {
+export default function LandingPage({ onAuthSuccess, accounts = [] }) {
   const [modalOpen, setModalOpen] = useState(false)
   const [modalDefaultTab, setModalDefaultTab] = useState('signin')
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -206,6 +206,36 @@ export default function LandingPage({ onAuthSuccess }) {
             </div>
           </div>
         </section>
+
+        {accounts.length > 0 && (
+          <section className="py-12 bg-slate-50 border-t border-slate-200/60">
+            <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+              <h3 className="text-lg font-bold text-slate-900 mb-4">Connected Accounts</h3>
+              <div className="space-y-2">
+                {accounts.map((account) => (
+                  <div
+                    key={account.id}
+                    className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-800 capitalize">{account.provider}</p>
+                      <p className="text-sm text-slate-500 truncate">{account.email}</p>
+                    </div>
+                    <span
+                      className={`text-xs font-semibold px-2 py-1 rounded-full ${
+                        account.connected
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {account.connected ? 'Connected' : 'Not connected'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
       </main>
 
       {/* Footer */}
