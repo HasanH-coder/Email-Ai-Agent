@@ -143,7 +143,7 @@ export default function LandingPage({ onAuthSuccess }) {
             {/* Pill badge */}
             <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-indigo-50 border border-indigo-100 mb-8">
               <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
-              <span className="text-sm font-medium text-indigo-700">Now with GPT-4 Integration</span>
+              <span className="text-sm font-medium text-indigo-700">Now with GPT-5.2 Integration</span>
             </div>
 
             {/* Headline */}

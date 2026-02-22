@@ -129,6 +129,30 @@ const initialDrafts = [
   },
 ]
 
+const EMAIL_STORAGE_KEYS = {
+  gmail: 'mailpilot:gmailEmails',
+  outlook: 'mailpilot:outlookEmails',
+}
+
+function normalizeEmailPins(emails) {
+  return emails.map((email) => ({ ...email, pinned: Boolean(email.pinned) }))
+}
+
+function loadEmailsFromStorage(storageKey, fallbackEmails) {
+  const normalizedFallback = normalizeEmailPins(fallbackEmails)
+  if (typeof window === 'undefined') return normalizedFallback
+
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) return normalizedFallback
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return normalizedFallback
+    return normalizeEmailPins(parsed)
+  } catch {
+    return normalizedFallback
+  }
+}
+
 // --- Icons ---
 function InboxIcon({ className }) {
   return (
@@ -187,6 +211,30 @@ function StarIcon({ className, filled }) {
   ) : (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" />
+    </svg>
+  )
+}
+
+function PinIcon({ className, filled }) {
+  return (
+    <svg className={className} fill={filled ? 'currentColor' : 'none'} viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.7}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="m15 4.5 4.5 4.5-3 3v4.5L12 21v-4.5L7.5 12l3-3V4.5H15z"
+      />
+    </svg>
+  )
+}
+
+function ReplyIcon({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9 10.5 3.75 15.75 9 21m-5.25-5.25h9.75A6.75 6.75 0 0 1 20.25 22.5v0"
+      />
     </svg>
   )
 }
@@ -955,8 +1003,12 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
 
 // --- Main Dashboard ---
 export default function EmailDashboard({ onSignOut }) {
-  const [gmailEmailState, setGmailEmails] = useState(gmailEmails)
-  const [outlookEmailState, setOutlookEmails] = useState(outlookEmails)
+  const [gmailEmailState, setGmailEmails] = useState(() =>
+    loadEmailsFromStorage(EMAIL_STORAGE_KEYS.gmail, gmailEmails)
+  )
+  const [outlookEmailState, setOutlookEmails] = useState(() =>
+    loadEmailsFromStorage(EMAIL_STORAGE_KEYS.outlook, outlookEmails)
+  )
   const [drafts, setDrafts] = useState(initialDrafts)
   const [sentEmails, setSentEmails] = useState([])
   const [emailThreads, setEmailThreads] = useState({})
@@ -1004,6 +1056,16 @@ export default function EmailDashboard({ onSignOut }) {
   const outlookUnread = outlookEmailState.filter((e) => !e.read).length
   const totalUnread = gmailUnread + outlookUnread
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(EMAIL_STORAGE_KEYS.gmail, JSON.stringify(gmailEmailState))
+  }, [gmailEmailState])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(EMAIL_STORAGE_KEYS.outlook, JSON.stringify(outlookEmailState))
+  }, [outlookEmailState])
+
   function handleSelectEmail(id) {
     setSelectedEmailId(id)
     setCurrentEmails((prev) => prev.map((e) => (e.id === id ? { ...e, read: true } : e)))
@@ -1020,6 +1082,11 @@ export default function EmailDashboard({ onSignOut }) {
     setCurrentEmails((prev) => prev.map((em) => (em.id === id ? { ...em, starred: !em.starred } : em)))
   }
 
+  function togglePin(id, e) {
+    if (e) e.stopPropagation()
+    setCurrentEmails((prev) => prev.map((em) => (em.id === id ? { ...em, pinned: !em.pinned } : em)))
+  }
+
   function getFilteredEmails() {
     let filtered = currentEmails
     if (activeFilter === 'unread') filtered = filtered.filter((e) => !e.read)
@@ -1034,6 +1101,13 @@ export default function EmailDashboard({ onSignOut }) {
       )
     }
     return filtered
+      .map((email, index) => ({ email, index }))
+      .sort((a, b) => {
+        const pinDifference = Number(Boolean(b.email.pinned)) - Number(Boolean(a.email.pinned))
+        if (pinDifference !== 0) return pinDifference
+        return a.index - b.index
+      })
+      .map(({ email }) => email)
   }
 
   function handleProviderSwitch(provider) {
@@ -1109,38 +1183,14 @@ export default function EmailDashboard({ onSignOut }) {
     setSentEmails((prev) => [sentEmail, ...prev])
     setSelectedSentEmailId(sentEmail.id)
 
-    const inboxEmail = {
-      id: now.getTime(),
-      sender: 'You',
-      email: connectedEmails[provider] || 'you@example.com',
-      subject: sentEmail.subject,
-      preview: sentEmail.body.slice(0, 110),
-      body: sentEmail.body,
-      time: now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
-      date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      read: true,
-      starred: false,
-      avatar: 'U',
-      avatarColor: 'bg-indigo-500',
-      provider,
-      threadRootId,
-      replyToId: data.replyToId || null,
-    }
-
-    if (provider === 'gmail') {
-      setGmailEmails((prev) => [inboxEmail, ...prev])
-    } else {
-      setOutlookEmails((prev) => [inboxEmail, ...prev])
-    }
-
     if (threadRootId) {
       const threadReply = {
-        id: inboxEmail.id,
+        id: sentEmail.id,
         from: 'You',
         to: sentEmail.to,
         body: sentEmail.body,
-        date: inboxEmail.date,
-        time: inboxEmail.time,
+        date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        time: now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
       }
       setEmailThreads((prev) => ({
         ...prev,
@@ -1205,6 +1255,20 @@ export default function EmailDashboard({ onSignOut }) {
       draftId,
     })
     setAiActionMessage('Email generated and saved to Drafts.')
+    setAiActionTone('success')
+  }
+
+  function handleReplySelectedEmail() {
+    if (!selectedEmail) {
+      setAiActionMessage('Please select an email first.')
+      setAiActionTone('error')
+      return
+    }
+
+    setAiGeneratedEmail('')
+    setAiGeneratedMeta(null)
+    setAiPrompt('')
+    setAiActionMessage(`Reply mode enabled for "${selectedEmail.subject}". Tell the AI what you want to say, then click Generate.`)
     setAiActionTone('success')
   }
 
@@ -1432,6 +1496,8 @@ export default function EmailDashboard({ onSignOut }) {
               setActiveFilter={setActiveFilter}
               onSelectEmail={handleSelectEmail}
               onToggleStar={handleToggleStar}
+              onTogglePin={togglePin}
+              onReplyEmail={handleReplySelectedEmail}
               threadReplies={selectedThreadReplies}
               aiPrompt={aiPrompt}
               setAiPrompt={handleInboxPromptChange}
@@ -1585,6 +1651,8 @@ function InboxPage({
   setActiveFilter,
   onSelectEmail,
   onToggleStar,
+  onTogglePin,
+  onReplyEmail,
   threadReplies,
   aiPrompt,
   setAiPrompt,
@@ -1762,15 +1830,36 @@ function InboxPage({
                     {selectedEmail.email} &middot; {selectedEmail.date}
                   </p>
                 </div>
-                <button
-                  onClick={() => onToggleStar(selectedEmail.id)}
-                  className={`shrink-0 cursor-pointer transition-colors ${
-                    selectedEmail.starred ? 'text-amber-400' : 'text-slate-300 hover:text-amber-400'
-                  }`}
-                  aria-label={selectedEmail.starred ? 'Unstar' : 'Star'}
-                >
-                  <StarIcon className="w-5 h-5" filled={selectedEmail.starred} />
-                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={onReplyEmail}
+                    className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 transition-colors cursor-pointer"
+                    aria-label="Reply"
+                    title="Reply"
+                  >
+                    <ReplyIcon className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => onTogglePin(selectedEmail.id)}
+                    className={`w-8 h-8 inline-flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
+                      selectedEmail.pinned ? 'text-indigo-500 bg-indigo-50' : 'text-slate-300 hover:text-indigo-500 hover:bg-indigo-50'
+                    }`}
+                    aria-label={selectedEmail.pinned ? 'Unpin' : 'Pin'}
+                    title={selectedEmail.pinned ? 'Unpin email' : 'Pin email'}
+                  >
+                    <PinIcon className="w-4 h-4" filled={selectedEmail.pinned} />
+                  </button>
+                  <button
+                    onClick={() => onToggleStar(selectedEmail.id)}
+                    className={`w-8 h-8 inline-flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
+                      selectedEmail.starred ? 'text-amber-400 bg-amber-50' : 'text-slate-300 hover:text-amber-400 hover:bg-amber-50'
+                    }`}
+                    aria-label={selectedEmail.starred ? 'Unstar' : 'Star'}
+                    title={selectedEmail.starred ? 'Unstar email' : 'Star email'}
+                  >
+                    <StarIcon className="w-5 h-5" filled={selectedEmail.starred} />
+                  </button>
+                </div>
               </div>
             </div>
 
