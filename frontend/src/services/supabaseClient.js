@@ -1,0 +1,19 @@
+import { createClient } from '@supabase/supabase-js'
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+let cachedClient = null
+
+export function getSupabase() {
+  if (!supabaseUrl || !supabaseAnonKey) {
+    console.error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY in frontend environment variables.')
+    return null
+  }
+
+  if (!cachedClient) {
+    cachedClient = createClient(supabaseUrl, supabaseAnonKey)
+  }
+  return cachedClient
+}
+
+export const supabase = getSupabase()

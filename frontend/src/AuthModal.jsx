@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { getSupabase } from './services/supabaseClient'
 
 export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab = 'signin' }) {
   const [activeTab, setActiveTab] = useState(defaultTab)
   const [step, setStep] = useState('form')
   const [verifyEmail, setVerifyEmail] = useState('')
-  const [verifyCode, setVerifyCode] = useState('')
   const [otpValues, setOtpValues] = useState(['', '', '', '', '', ''])
   const [otpError, setOtpError] = useState('')
   const [countdown, setCountdown] = useState(30)
@@ -21,6 +21,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
   const [lastName, setLastName] = useState('')
   const [signUpEmail, setSignUpEmail] = useState('')
   const [signUpPassword, setSignUpPassword] = useState('')
+  const [authLoading, setAuthLoading] = useState(false)
+  const [authError, setAuthError] = useState('')
 
   // Reset when defaultTab changes or modal opens
   useEffect(() => {
@@ -31,6 +33,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       setOtpError('')
       setCountdown(30)
       setCanResend(false)
+      setAuthLoading(false)
+      setAuthError('')
     }
   }, [isOpen, defaultTab])
 
@@ -60,28 +64,66 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
     }
   }, [isOpen, onClose])
 
-  function generateCode() {
-    const code = String(Math.floor(100000 + Math.random() * 900000))
-    console.log('Verification code:', code)
-    return code
-  }
+  async function requestOtp(email, shouldCreateUser = false) {
+    const supabase = getSupabase()
+    if (!supabase) {
+      throw new Error('Missing Supabase env vars.')
+    }
 
-  function handleSignIn(e) {
-    e.preventDefault()
-    onAuthSuccess()
-    onClose()
-  }
+    const payload = shouldCreateUser
+      ? {
+          email,
+          options: { shouldCreateUser: true },
+        }
+      : { email }
 
-  function handleSignUp(e) {
-    e.preventDefault()
-    const code = generateCode()
-    setVerifyCode(code)
-    setVerifyEmail(signUpEmail)
+    const { error } = await supabase.auth.signInWithOtp(payload)
+    if (error) {
+      throw new Error(error.message || 'Failed to send verification code.')
+    }
+
+    setVerifyEmail(email)
     setStep('verify')
     setCountdown(30)
     setCanResend(false)
     setOtpValues(['', '', '', '', '', ''])
     setOtpError('')
+  }
+
+  async function handleSignIn(e) {
+    e.preventDefault()
+    if (!signInEmail.trim()) {
+      setAuthError('Email is required.')
+      return
+    }
+
+    setAuthLoading(true)
+    setAuthError('')
+    try {
+      await requestOtp(signInEmail.trim(), false)
+    } catch (error) {
+      setAuthError(error.message || 'Sign in failed.')
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  async function handleSignUp(e) {
+    e.preventDefault()
+    if (!signUpEmail.trim()) {
+      setAuthError('Email is required.')
+      return
+    }
+
+    setAuthLoading(true)
+    setAuthError('')
+    try {
+      await requestOtp(signUpEmail.trim(), true)
+    } catch (error) {
+      setAuthError(error.message || 'Sign up failed.')
+    } finally {
+      setAuthLoading(false)
+    }
   }
 
   function handleOtpChange(index, value) {
@@ -111,25 +153,60 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
     }
   }
 
-  function handleVerify(e) {
+  async function handleVerify(e) {
     e.preventDefault()
+    const supabase = getSupabase()
+    if (!supabase) {
+      setOtpError('Missing Supabase env vars.')
+      return
+    }
+
     const entered = otpValues.join('')
-    if (entered === verifyCode) {
-      onAuthSuccess()
+    if (entered.length !== 6) {
+      setOtpError('Enter the 6-digit code from your email.')
+      return
+    }
+
+    setAuthLoading(true)
+    setOtpError('')
+
+    try {
+      const { data, error } = await supabase.auth.verifyOtp({
+        email: verifyEmail,
+        token: entered,
+        type: 'email_otp',
+      })
+
+      if (error) {
+        setOtpError(error.message || 'Invalid code. Please try again.')
+        return
+      }
+
+      const accessToken = data?.session?.access_token
+      const user = data?.user || data?.session?.user
+
+      if (!accessToken || !user) {
+        setOtpError('Verification failed. Please try again.')
+        return
+      }
+
+      localStorage.setItem('auth_token', accessToken)
+      onAuthSuccess(user)
       onClose()
-    } else {
-      setOtpError('Invalid code. Please try again.')
+    } catch (error) {
+      setOtpError(error.message || 'Verification failed. Please try again.')
+    } finally {
+      setAuthLoading(false)
     }
   }
 
-  function handleResend() {
+  async function handleResend() {
     if (!canResend) return
-    const code = generateCode()
-    setVerifyCode(code)
-    setCountdown(30)
-    setCanResend(false)
-    setOtpValues(['', '', '', '', '', ''])
-    setOtpError('')
+    try {
+      await requestOtp(verifyEmail, activeTab === 'signup')
+    } catch (error) {
+      setOtpError(error.message || 'Failed to resend code. Please try again.')
+    }
   }
 
   const handleBackdropClick = useCallback(
@@ -177,7 +254,10 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
             {/* Tabs */}
             <div className="flex rounded-xl bg-slate-100 p-1 mb-6">
               <button
-                onClick={() => setActiveTab('signin')}
+                onClick={() => {
+                  setActiveTab('signin')
+                  setAuthError('')
+                }}
                 className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
                   activeTab === 'signin'
                     ? 'bg-white text-slate-900 shadow-sm'
@@ -187,7 +267,10 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 Sign In
               </button>
               <button
-                onClick={() => setActiveTab('signup')}
+                onClick={() => {
+                  setActiveTab('signup')
+                  setAuthError('')
+                }}
                 className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
                   activeTab === 'signup'
                     ? 'bg-white text-slate-900 shadow-sm'
@@ -222,7 +305,6 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                   <input
                     id="signin-password"
                     type="password"
-                    required
                     value={signInPassword}
                     onChange={(e) => setSignInPassword(e.target.value)}
                     placeholder="Enter your password"
@@ -231,15 +313,24 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 </div>
                 <button
                   type="submit"
-                  className="w-full py-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 active:bg-indigo-800 transition-colors cursor-pointer shadow-lg shadow-indigo-200"
+                  disabled={authLoading}
+                  className={`w-full py-3 rounded-xl text-sm font-semibold transition-colors shadow-lg shadow-indigo-200 ${
+                    authLoading
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                      : 'bg-indigo-600 text-white hover:bg-indigo-700 active:bg-indigo-800 cursor-pointer'
+                  }`}
                 >
-                  Sign In
+                  {authLoading ? 'Signing In...' : 'Sign In'}
                 </button>
+                {authError && <p className="text-sm text-red-600 text-center">{authError}</p>}
                 <p className="text-center text-sm text-slate-500">
                   {"Don't have an account? "}
                   <button
                     type="button"
-                    onClick={() => setActiveTab('signup')}
+                    onClick={() => {
+                      setActiveTab('signup')
+                      setAuthError('')
+                    }}
                     className="text-indigo-600 font-medium hover:text-indigo-700 cursor-pointer"
                   >
                     Sign Up
@@ -257,10 +348,9 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                       First Name
                     </label>
                     <input
-                      id="first-name"
-                      type="text"
-                      required
-                      value={firstName}
+                    id="first-name"
+                    type="text"
+                    value={firstName}
                       onChange={(e) => setFirstName(e.target.value)}
                       placeholder="Jane"
                       className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-900 placeholder-slate-400 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-shadow"
@@ -271,10 +361,9 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                       Last Name
                     </label>
                     <input
-                      id="last-name"
-                      type="text"
-                      required
-                      value={lastName}
+                    id="last-name"
+                    type="text"
+                    value={lastName}
                       onChange={(e) => setLastName(e.target.value)}
                       placeholder="Doe"
                       className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-900 placeholder-slate-400 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-shadow"
@@ -302,7 +391,6 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                   <input
                     id="signup-password"
                     type="password"
-                    required
                     value={signUpPassword}
                     onChange={(e) => setSignUpPassword(e.target.value)}
                     placeholder="Create a password"
@@ -311,15 +399,24 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 </div>
                 <button
                   type="submit"
-                  className="w-full py-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 active:bg-indigo-800 transition-colors cursor-pointer shadow-lg shadow-indigo-200"
+                  disabled={authLoading}
+                  className={`w-full py-3 rounded-xl text-sm font-semibold transition-colors shadow-lg shadow-indigo-200 ${
+                    authLoading
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                      : 'bg-indigo-600 text-white hover:bg-indigo-700 active:bg-indigo-800 cursor-pointer'
+                  }`}
                 >
-                  Create Account
+                  {authLoading ? 'Creating Account...' : 'Create Account'}
                 </button>
+                {authError && <p className="text-sm text-red-600 text-center">{authError}</p>}
                 <p className="text-center text-sm text-slate-500">
                   Already have an account?{' '}
                   <button
                     type="button"
-                    onClick={() => setActiveTab('signin')}
+                    onClick={() => {
+                      setActiveTab('signin')
+                      setAuthError('')
+                    }}
                     className="text-indigo-600 font-medium hover:text-indigo-700 cursor-pointer"
                   >
                     Sign In
@@ -384,9 +481,14 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
               <div className="mt-6">
                 <button
                   type="submit"
-                  className="w-full py-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 active:bg-indigo-800 transition-colors cursor-pointer shadow-lg shadow-indigo-200"
+                  disabled={authLoading}
+                  className={`w-full py-3 rounded-xl text-sm font-semibold transition-colors shadow-lg shadow-indigo-200 ${
+                    authLoading
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                      : 'bg-indigo-600 text-white hover:bg-indigo-700 active:bg-indigo-800 cursor-pointer'
+                  }`}
                 >
-                  Verify Code
+                  {authLoading ? 'Verifying...' : 'Verify Code'}
                 </button>
               </div>
 
