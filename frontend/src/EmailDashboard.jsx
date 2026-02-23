@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { startGoogleConnect, startMicrosoftConnect } from './services/connect'
 
 // --- Mock Data ---
 const gmailEmails = [
@@ -1033,6 +1034,7 @@ export default function EmailDashboard({ onSignOut }) {
   const [connectModal, setConnectModal] = useState({ open: false, provider: null, fromInbox: false })
   const [disconnectModal, setDisconnectModal] = useState({ open: false, provider: null })
   const [directSendModal, setDirectSendModal] = useState({ open: false, payload: null })
+  const [connectActionError, setConnectActionError] = useState('')
 
   // Draft editing
   const [editingDraft, setEditingDraft] = useState(null)
@@ -1112,7 +1114,7 @@ export default function EmailDashboard({ onSignOut }) {
 
   function handleProviderSwitch(provider) {
     if (!connectedAccounts[provider]) {
-      setConnectModal({ open: true, provider, fromInbox: true })
+      handleConnectStart(provider)
       return
     }
     setActiveProvider(provider)
@@ -1137,6 +1139,19 @@ export default function EmailDashboard({ onSignOut }) {
       setMobileShowDetail(false)
     }
     setConnectModal({ open: false, provider: null, fromInbox: false })
+  }
+
+  async function handleConnectStart(provider) {
+    setConnectActionError('')
+    try {
+      if (provider === 'gmail') {
+        await startGoogleConnect()
+      } else {
+        await startMicrosoftConnect()
+      }
+    } catch (error) {
+      setConnectActionError(error?.message || 'Could not start account connection.')
+    }
   }
 
   function handleDisconnect(provider) {
@@ -1536,8 +1551,9 @@ export default function EmailDashboard({ onSignOut }) {
               setUseSignature={setUseSignature}
               connectedAccounts={connectedAccounts}
               connectedEmails={connectedEmails}
-              onConnectRequest={(provider) => setConnectModal({ open: true, provider, fromInbox: false })}
+              onConnectRequest={handleConnectStart}
               onDisconnect={(provider) => setDisconnectModal({ open: true, provider })}
+              connectActionError={connectActionError}
             />
           )}
           {activePage === 'sent' && (
@@ -2126,7 +2142,7 @@ function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEma
 
 
 // --- Settings Page ---
-function SettingsPage({ signature, setSignature, useSignature, setUseSignature, connectedAccounts, connectedEmails, onConnectRequest, onDisconnect }) {
+function SettingsPage({ signature, setSignature, useSignature, setUseSignature, connectedAccounts, connectedEmails, onConnectRequest, onDisconnect, connectActionError }) {
   return (
     <div className="h-full overflow-y-auto bg-white">
       <div className="max-w-2xl mx-auto px-6 py-8">
@@ -2249,6 +2265,9 @@ function SettingsPage({ signature, setSignature, useSignature, setUseSignature, 
               </div>
             </div>
           </div>
+          {connectActionError && (
+            <p className="mt-3 text-xs font-medium text-red-600">{connectActionError}</p>
+          )}
         </div>
       </div>
     </div>

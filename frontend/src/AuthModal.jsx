@@ -7,6 +7,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
   const [verifyEmail, setVerifyEmail] = useState('')
   const [otpValues, setOtpValues] = useState(['', '', '', '', '', ''])
   const [otpError, setOtpError] = useState('')
+  const [otpInfo, setOtpInfo] = useState('')
   const [countdown, setCountdown] = useState(30)
   const [canResend, setCanResend] = useState(false)
   const otpRefs = useRef([])
@@ -22,7 +23,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
   const [signUpEmail, setSignUpEmail] = useState('')
   const [signUpPassword, setSignUpPassword] = useState('')
   const [authLoading, setAuthLoading] = useState(false)
-  const [authError, setAuthError] = useState('')
+  const [signInError, setSignInError] = useState('')
+  const [signUpError, setSignUpError] = useState('')
 
   // Reset when defaultTab changes or modal opens
   useEffect(() => {
@@ -31,10 +33,12 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       setStep('form')
       setOtpValues(['', '', '', '', '', ''])
       setOtpError('')
+      setOtpInfo('')
       setCountdown(30)
       setCanResend(false)
       setAuthLoading(false)
-      setAuthError('')
+      setSignInError('')
+      setSignUpError('')
     }
   }, [isOpen, defaultTab])
 
@@ -64,45 +68,56 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
     }
   }, [isOpen, onClose])
 
-  async function requestOtp(email, shouldCreateUser = false) {
-    const supabase = getSupabase()
-    if (!supabase) {
-      throw new Error('Missing Supabase env vars.')
-    }
-
-    const payload = shouldCreateUser
-      ? {
-          email,
-          options: { shouldCreateUser: true },
-        }
-      : { email }
-
-    const { error } = await supabase.auth.signInWithOtp(payload)
-    if (error) {
-      throw new Error(error.message || 'Failed to send verification code.')
-    }
-
-    setVerifyEmail(email)
-    setStep('verify')
-    setCountdown(30)
-    setCanResend(false)
-    setOtpValues(['', '', '', '', '', ''])
-    setOtpError('')
-  }
-
   async function handleSignIn(e) {
     e.preventDefault()
+    const supabase = getSupabase()
+    if (!supabase) {
+      setSignInError('Missing Supabase env vars.')
+      return
+    }
+
     if (!signInEmail.trim()) {
-      setAuthError('Email is required.')
+      setSignInError('Email is required.')
+      return
+    }
+    if (!signInPassword) {
+      setSignInError('Password is required.')
       return
     }
 
     setAuthLoading(true)
-    setAuthError('')
+    setSignInError('')
     try {
-      await requestOtp(signInEmail.trim(), false)
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: signInEmail.trim(),
+        password: signInPassword,
+      })
+
+      if (error) {
+        const msg = (error.message || '').toLowerCase()
+
+        if (msg.includes('invalid login credentials')) {
+          setSignInError('Wrong email or password.')
+        } else if (msg.includes('email not confirmed')) {
+          setSignInError('Please verify your email first.')
+        } else {
+          setSignInError(error.message || 'Sign in failed.')
+        }
+        return
+      }
+
+      const accessToken = data?.session?.access_token
+      const user = data?.user || data?.session?.user
+      if (!accessToken || !user) {
+        setSignInError('Sign in failed.')
+        return
+      }
+
+      localStorage.setItem('auth_token', accessToken)
+      onAuthSuccess(user)
+      onClose()
     } catch (error) {
-      setAuthError(error.message || 'Sign in failed.')
+      setSignInError(error.message || 'Sign in failed.')
     } finally {
       setAuthLoading(false)
     }
@@ -110,17 +125,60 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
 
   async function handleSignUp(e) {
     e.preventDefault()
+    const supabase = getSupabase()
+    if (!supabase) {
+      setSignUpError('Missing Supabase env vars.')
+      return
+    }
+
     if (!signUpEmail.trim()) {
-      setAuthError('Email is required.')
+      setSignUpError('Email is required.')
+      return
+    }
+    if (!signUpPassword) {
+      setSignUpError('Password is required.')
       return
     }
 
     setAuthLoading(true)
-    setAuthError('')
+    setSignUpError('')
     try {
-      await requestOtp(signUpEmail.trim(), true)
+      const normalizedEmail = signUpEmail.trim()
+      const { data, error } = await supabase.auth.signUp({
+        email: normalizedEmail,
+        password: signUpPassword,
+        options: {
+          emailRedirectTo: window.location.origin,
+        },
+      })
+
+      if (error) {
+        const msg = (error.message || '').toLowerCase()
+
+        if (msg.includes('user already registered')) {
+          setSignUpError('Account already exists. Please Sign In.')
+          return
+        }
+
+        setSignUpError(error.message || 'Sign up failed.')
+        return
+      }
+
+      if (data?.user && data.user.identities && data.user.identities.length === 0) {
+        setSignUpError('Account already exists. Please Sign In.')
+        return
+      }
+
+      setVerifyEmail(normalizedEmail)
+      setActiveTab('signup')
+      setStep('verify')
+      setCountdown(30)
+      setCanResend(false)
+      setOtpValues(['', '', '', '', '', ''])
+      setOtpError('')
+      setOtpInfo('Use the latest code only. Older codes stop working.')
     } catch (error) {
-      setAuthError(error.message || 'Sign up failed.')
+      setSignUpError(error.message || 'Sign up failed.')
     } finally {
       setAuthLoading(false)
     }
@@ -174,11 +232,11 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       const { data, error } = await supabase.auth.verifyOtp({
         email: verifyEmail,
         token: entered,
-        type: 'email_otp',
+        type: 'signup',
       })
 
       if (error) {
-        setOtpError(error.message || 'Invalid code. Please try again.')
+        setOtpError('Invalid or expired code. Use the latest code only.')
         return
       }
 
@@ -186,7 +244,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       const user = data?.user || data?.session?.user
 
       if (!accessToken || !user) {
-        setOtpError('Verification failed. Please try again.')
+        setOtpError('Verification failed.')
         return
       }
 
@@ -202,8 +260,26 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
 
   async function handleResend() {
     if (!canResend) return
+    const supabase = getSupabase()
+    if (!supabase) {
+      setOtpError('Missing Supabase env vars.')
+      return
+    }
+
     try {
-      await requestOtp(verifyEmail, activeTab === 'signup')
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: verifyEmail,
+      })
+      if (error) {
+        setOtpError(error.message || 'Failed to resend code. Please try again.')
+        return
+      }
+      setCountdown(30)
+      setCanResend(false)
+      setOtpValues(['', '', '', '', '', ''])
+      setOtpError('')
+      setOtpInfo('Use the latest code only. Older codes stop working.')
     } catch (error) {
       setOtpError(error.message || 'Failed to resend code. Please try again.')
     }
@@ -256,7 +332,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
               <button
                 onClick={() => {
                   setActiveTab('signin')
-                  setAuthError('')
+                  setSignUpError('')
+                  setOtpError('')
                 }}
                 className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
                   activeTab === 'signin'
@@ -269,7 +346,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
               <button
                 onClick={() => {
                   setActiveTab('signup')
-                  setAuthError('')
+                  setSignInError('')
                 }}
                 className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
                   activeTab === 'signup'
@@ -322,14 +399,14 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 >
                   {authLoading ? 'Signing In...' : 'Sign In'}
                 </button>
-                {authError && <p className="text-sm text-red-600 text-center">{authError}</p>}
+                {signInError && <p className="text-sm text-red-600 text-center">{signInError}</p>}
                 <p className="text-center text-sm text-slate-500">
                   {"Don't have an account? "}
                   <button
                     type="button"
                     onClick={() => {
                       setActiveTab('signup')
-                      setAuthError('')
+                      setSignInError('')
                     }}
                     className="text-indigo-600 font-medium hover:text-indigo-700 cursor-pointer"
                   >
@@ -408,14 +485,15 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 >
                   {authLoading ? 'Creating Account...' : 'Create Account'}
                 </button>
-                {authError && <p className="text-sm text-red-600 text-center">{authError}</p>}
+                {signUpError && <p className="text-sm text-red-600 text-center">{signUpError}</p>}
                 <p className="text-center text-sm text-slate-500">
                   Already have an account?{' '}
                   <button
                     type="button"
                     onClick={() => {
                       setActiveTab('signin')
-                      setAuthError('')
+                      setSignUpError('')
+                      setOtpError('')
                     }}
                     className="text-indigo-600 font-medium hover:text-indigo-700 cursor-pointer"
                   >
@@ -476,6 +554,9 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
 
               {otpError && (
                 <p className="text-center text-sm text-red-500 mb-4 font-medium">{otpError}</p>
+              )}
+              {otpInfo && !otpError && (
+                <p className="text-center text-xs text-slate-500 mb-4 font-medium">{otpInfo}</p>
               )}
 
               <div className="mt-6">

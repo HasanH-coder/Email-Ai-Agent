@@ -31,7 +31,18 @@ const features = [
   },
 ]
 
-export default function LandingPage({ onAuthSuccess, accounts = [] }) {
+export default function LandingPage({
+  onAuthSuccess,
+  accounts = [],
+  showDevAuthPanel = false,
+  authUser = null,
+  authEmail = '',
+  onAuthEmailChange = () => {},
+  onDevLogin = () => {},
+  onDevLogout = () => {},
+  authLoading = false,
+  authError = '',
+}) {
   const [modalOpen, setModalOpen] = useState(false)
   const [modalDefaultTab, setModalDefaultTab] = useState('signin')
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -232,6 +243,51 @@ export default function LandingPage({ onAuthSuccess, accounts = [] }) {
                     </span>
                   </div>
                 ))}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {showDevAuthPanel && (
+          <section className="py-8 bg-white border-t border-slate-200/60">
+            <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-sm font-semibold text-slate-900 mb-3">Dev Auth Panel</p>
+                {authUser ? (
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <p className="text-sm text-slate-700">
+                      Logged in as <span className="font-semibold">{authUser.email}</span>
+                    </p>
+                    <button
+                      onClick={onDevLogout}
+                      className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-200 text-slate-700 hover:bg-slate-300 transition-colors cursor-pointer"
+                    >
+                      Logout
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input
+                      type="email"
+                      value={authEmail}
+                      onChange={(e) => onAuthEmailChange(e.target.value)}
+                      placeholder="test@example.com"
+                      className="px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent bg-white min-w-[220px]"
+                    />
+                    <button
+                      onClick={onDevLogin}
+                      disabled={authLoading}
+                      className={`px-3 py-2 text-xs font-semibold rounded-lg transition-colors ${
+                        authLoading
+                          ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                          : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer'
+                      }`}
+                    >
+                      {authLoading ? 'Logging in...' : 'Login'}
+                    </button>
+                  </div>
+                )}
+                {authError && <p className="mt-2 text-xs font-medium text-red-600">{authError}</p>}
               </div>
             </div>
           </section>
