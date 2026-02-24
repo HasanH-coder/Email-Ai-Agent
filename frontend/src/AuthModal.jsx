@@ -25,6 +25,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
   const [authLoading, setAuthLoading] = useState(false)
   const [signInError, setSignInError] = useState('')
   const [signUpError, setSignUpError] = useState('')
+  const [googleLoading, setGoogleLoading] = useState(false)
+  const [googleError, setGoogleError] = useState('')
 
   // Reset when defaultTab changes or modal opens
   useEffect(() => {
@@ -39,8 +41,37 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       setAuthLoading(false)
       setSignInError('')
       setSignUpError('')
+      setGoogleLoading(false)
+      setGoogleError('')
     }
   }, [isOpen, defaultTab])
+
+  useEffect(() => {
+    if (!isOpen) return
+    let cancelled = false
+
+    async function closeIfAlreadyAuthenticated() {
+      const supabase = getSupabase()
+      if (!supabase) return
+
+      try {
+        const { data, error } = await supabase.auth.getSession()
+        if (error || cancelled) return
+        const user = data?.session?.user
+        if (user) {
+          onAuthSuccess(user)
+          onClose()
+        }
+      } catch (error) {
+        console.error('Session check failed:', error)
+      }
+    }
+
+    closeIfAlreadyAuthenticated()
+    return () => {
+      cancelled = true
+    }
+  }, [isOpen, onAuthSuccess, onClose])
 
   // Countdown timer for resend
   useEffect(() => {
@@ -181,6 +212,40 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       setSignUpError(error.message || 'Sign up failed.')
     } finally {
       setAuthLoading(false)
+    }
+  }
+
+  async function handleGoogleAuth() {
+    const supabase = getSupabase()
+    if (!supabase) {
+      setGoogleError('Missing Supabase env vars.')
+      return
+    }
+
+    setGoogleLoading(true)
+    setGoogleError('')
+    setSignInError('')
+    setSignUpError('')
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${window.location.origin}/dashboard`,
+          queryParams: {
+            prompt: 'select_account',
+          },
+        },
+      })
+
+      if (error) {
+        console.error('Google OAuth sign-in error:', error)
+        setGoogleError(error.message || 'Google OAuth failed.')
+        setGoogleLoading(false)
+      }
+    } catch (error) {
+      console.error('Google OAuth unexpected error:', error)
+      setGoogleError(error.message || 'Google OAuth failed.')
+      setGoogleLoading(false)
     }
   }
 
@@ -334,6 +399,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                   setActiveTab('signin')
                   setSignUpError('')
                   setOtpError('')
+                  setGoogleError('')
                 }}
                 className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
                   activeTab === 'signin'
@@ -347,6 +413,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 onClick={() => {
                   setActiveTab('signup')
                   setSignInError('')
+                  setGoogleError('')
                 }}
                 className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
                   activeTab === 'signup'
@@ -399,6 +466,25 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 >
                   {authLoading ? 'Signing In...' : 'Sign In'}
                 </button>
+                <button
+                  type="button"
+                  onClick={handleGoogleAuth}
+                  disabled={authLoading || googleLoading}
+                  className={`w-full py-2.5 px-4 rounded-xl border text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${
+                    authLoading || googleLoading
+                      ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 cursor-pointer'
+                  }`}
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" aria-hidden="true">
+                    <path fill="#EA4335" d="M12 10.2v3.9h5.5c-.2 1.3-1.5 3.9-5.5 3.9-3.3 0-6-2.7-6-6s2.7-6 6-6c1.9 0 3.2.8 3.9 1.4l2.6-2.5C16.8 3.5 14.6 2.6 12 2.6A9.4 9.4 0 0 0 2.6 12 9.4 9.4 0 0 0 12 21.4c5.4 0 9-3.8 9-9.1 0-.6-.1-1-.2-1.5H12Z" />
+                    <path fill="#34A853" d="M3.7 7.3l3.2 2.3C7.7 8 9.7 6.5 12 6.5c1.9 0 3.2.8 3.9 1.4l2.6-2.5C16.8 3.5 14.6 2.6 12 2.6c-3.7 0-7 2.1-8.3 4.7Z" />
+                    <path fill="#4A90E2" d="M12 21.4c2.5 0 4.7-.8 6.2-2.3l-2.9-2.4c-.8.6-1.9 1.2-3.3 1.2-3.9 0-5.3-2.6-5.5-3.9L3.3 16.5c1.3 2.6 4.6 4.9 8.7 4.9Z" />
+                    <path fill="#FBBC05" d="M3.3 16.5A9.3 9.3 0 0 1 2.6 12c0-1.5.4-3 .9-4.3l3.4 2.5c-.2.5-.3 1.1-.3 1.8 0 .6.1 1.3.3 1.8l-3.6 2.7Z" />
+                  </svg>
+                  {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
+                </button>
+                {googleError && <p className="text-sm text-red-600 text-center">{googleError}</p>}
                 {signInError && <p className="text-sm text-red-600 text-center">{signInError}</p>}
                 <p className="text-center text-sm text-slate-500">
                   {"Don't have an account? "}
@@ -407,6 +493,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                     onClick={() => {
                       setActiveTab('signup')
                       setSignInError('')
+                      setGoogleError('')
                     }}
                     className="text-indigo-600 font-medium hover:text-indigo-700 cursor-pointer"
                   >
@@ -485,6 +572,25 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 >
                   {authLoading ? 'Creating Account...' : 'Create Account'}
                 </button>
+                <button
+                  type="button"
+                  onClick={handleGoogleAuth}
+                  disabled={authLoading || googleLoading}
+                  className={`w-full py-2.5 px-4 rounded-xl border text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${
+                    authLoading || googleLoading
+                      ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 cursor-pointer'
+                  }`}
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" aria-hidden="true">
+                    <path fill="#EA4335" d="M12 10.2v3.9h5.5c-.2 1.3-1.5 3.9-5.5 3.9-3.3 0-6-2.7-6-6s2.7-6 6-6c1.9 0 3.2.8 3.9 1.4l2.6-2.5C16.8 3.5 14.6 2.6 12 2.6A9.4 9.4 0 0 0 2.6 12 9.4 9.4 0 0 0 12 21.4c5.4 0 9-3.8 9-9.1 0-.6-.1-1-.2-1.5H12Z" />
+                    <path fill="#34A853" d="M3.7 7.3l3.2 2.3C7.7 8 9.7 6.5 12 6.5c1.9 0 3.2.8 3.9 1.4l2.6-2.5C16.8 3.5 14.6 2.6 12 2.6c-3.7 0-7 2.1-8.3 4.7Z" />
+                    <path fill="#4A90E2" d="M12 21.4c2.5 0 4.7-.8 6.2-2.3l-2.9-2.4c-.8.6-1.9 1.2-3.3 1.2-3.9 0-5.3-2.6-5.5-3.9L3.3 16.5c1.3 2.6 4.6 4.9 8.7 4.9Z" />
+                    <path fill="#FBBC05" d="M3.3 16.5A9.3 9.3 0 0 1 2.6 12c0-1.5.4-3 .9-4.3l3.4 2.5c-.2.5-.3 1.1-.3 1.8 0 .6.1 1.3.3 1.8l-3.6 2.7Z" />
+                  </svg>
+                  {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
+                </button>
+                {googleError && <p className="text-sm text-red-600 text-center">{googleError}</p>}
                 {signUpError && <p className="text-sm text-red-600 text-center">{signUpError}</p>}
                 <p className="text-center text-sm text-slate-500">
                   Already have an account?{' '}
@@ -494,6 +600,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                       setActiveTab('signin')
                       setSignUpError('')
                       setOtpError('')
+                      setGoogleError('')
                     }}
                     className="text-indigo-600 font-medium hover:text-indigo-700 cursor-pointer"
                   >
