@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import LandingPage from './LandingPage'
 import EmailDashboard from './EmailDashboard'
 import { apiFetch, clearStoredToken, setStoredToken } from './services/api'
@@ -29,6 +29,7 @@ export default function App() {
   const [authEmail, setAuthEmail] = useState('')
   const [authLoading, setAuthLoading] = useState(false)
   const [authError, setAuthError] = useState('')
+  const hasSyncedConnectedAccount = useRef(false)
 
   async function fetchAccounts(signal) {
     try {
@@ -151,6 +152,58 @@ export default function App() {
     }
 
     loadAuthUser()
+    return () => {
+      cancelled = true
+    }
+  }, [authSession?.access_token])
+
+  useEffect(() => {
+    if (!authSession?.access_token) {
+      hasSyncedConnectedAccount.current = false
+      return
+    }
+
+    if (hasSyncedConnectedAccount.current) return
+    hasSyncedConnectedAccount.current = true
+
+    const supabase = getSupabase()
+    if (!supabase) return
+
+    let cancelled = false
+
+    async function saveConnectedAccount() {
+      const { data, error } = await supabase.auth.getUser()
+      if (cancelled) return
+
+      if (error) {
+        console.error('Failed to get authenticated user:', error)
+        return
+      }
+
+      const user = data?.user
+      const provider = user?.app_metadata?.provider
+
+      if (!user?.id || !provider) return
+
+      const { error: upsertError } = await supabase.from('connected_accounts').upsert(
+        [
+          {
+            user_id: user.id,
+            provider,
+            email: user.email ?? null,
+          },
+        ],
+        { onConflict: 'user_id,provider' }
+      )
+
+      if (cancelled) return
+      if (upsertError) {
+        console.error('Failed to upsert connected account:', upsertError)
+      }
+    }
+
+    saveConnectedAccount()
+
     return () => {
       cancelled = true
     }

@@ -1774,9 +1774,19 @@ function InboxPage({
             </div>
           ) : (
             emails.map((email) => (
-              <button
+              <div
                 key={email.id}
+                role="button"
+                tabIndex={0}
+                aria-label={`Open email from ${email.sender}: ${email.subject}`}
                 onClick={() => onSelectEmail(email.id)}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    onSelectEmail(email.id)
+                  }
+                }}
                 className={`w-full text-left px-4 py-3.5 border-b border-slate-50 flex items-start gap-3 transition-colors cursor-pointer ${
                   email.id === selectedEmailId
                     ? 'bg-indigo-50/70'
@@ -1802,7 +1812,10 @@ function InboxPage({
                   <p className="text-xs text-slate-400 truncate">{email.preview}</p>
                 </div>
                 <button
-                  onClick={(e) => onToggleStar(email.id, e)}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onToggleStar(email.id, e)
+                  }}
                   className={`shrink-0 mt-1 cursor-pointer transition-colors ${
                     email.starred ? 'text-amber-400' : 'text-slate-300 hover:text-amber-400'
                   }`}
@@ -1810,7 +1823,7 @@ function InboxPage({
                 >
                   <StarIcon className="w-4 h-4" filled={email.starred} />
                 </button>
-              </button>
+              </div>
             ))
           )}
         </div>
