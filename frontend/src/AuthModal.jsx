@@ -1,5 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { getSupabase } from './services/supabaseClient'
+import { startGoogleConnect, startMicrosoftConnect } from './services/connect'
+
+function clearPendingProviderIntent() {
+  if (typeof window === 'undefined') return
+  window.localStorage.removeItem('connecting_provider')
+  window.localStorage.removeItem('connecting_provider_started_at')
+  window.localStorage.removeItem('mailpilot.oauth_provider_hint')
+}
 
 export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab = 'signin' }) {
   const [activeTab, setActiveTab] = useState(defaultTab)
@@ -27,6 +35,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
   const [signUpError, setSignUpError] = useState('')
   const [googleLoading, setGoogleLoading] = useState(false)
   const [googleError, setGoogleError] = useState('')
+  const [microsoftLoading, setMicrosoftLoading] = useState(false)
+  const [microsoftError, setMicrosoftError] = useState('')
 
   // Reset when defaultTab changes or modal opens
   useEffect(() => {
@@ -43,6 +53,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       setSignUpError('')
       setGoogleLoading(false)
       setGoogleError('')
+      setMicrosoftLoading(false)
+      setMicrosoftError('')
     }
   }, [isOpen, defaultTab])
 
@@ -59,7 +71,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
         if (error || cancelled) return
         const user = data?.session?.user
         if (user) {
-          onAuthSuccess(user)
+          onAuthSuccess(user, data?.session ?? null)
           onClose()
         }
       } catch (error) {
@@ -118,6 +130,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
 
     setAuthLoading(true)
     setSignInError('')
+    clearPendingProviderIntent()
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
         email: signInEmail.trim(),
@@ -145,7 +158,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       }
 
       localStorage.setItem('auth_token', accessToken)
-      onAuthSuccess(user)
+      onAuthSuccess(user, data?.session ?? null)
       onClose()
     } catch (error) {
       setSignInError(error.message || 'Sign in failed.')
@@ -216,36 +229,32 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
   }
 
   async function handleGoogleAuth() {
-    const supabase = getSupabase()
-    if (!supabase) {
-      setGoogleError('Missing Supabase env vars.')
-      return
-    }
-
     setGoogleLoading(true)
     setGoogleError('')
+    setMicrosoftError('')
     setSignInError('')
     setSignUpError('')
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: `${window.location.origin}/dashboard`,
-          queryParams: {
-            prompt: 'select_account',
-          },
-        },
-      })
-
-      if (error) {
-        console.error('Google OAuth sign-in error:', error)
-        setGoogleError(error.message || 'Google OAuth failed.')
-        setGoogleLoading(false)
-      }
+      await startGoogleConnect()
     } catch (error) {
       console.error('Google OAuth unexpected error:', error)
       setGoogleError(error.message || 'Google OAuth failed.')
       setGoogleLoading(false)
+    }
+  }
+
+  async function handleMicrosoftAuth() {
+    setMicrosoftLoading(true)
+    setMicrosoftError('')
+    setGoogleError('')
+    setSignInError('')
+    setSignUpError('')
+    try {
+      await startMicrosoftConnect(`${window.location.origin}/dashboard`, true)
+    } catch (error) {
+      console.error('Microsoft OAuth unexpected error:', error)
+      setMicrosoftError(error.message || 'Microsoft OAuth failed.')
+      setMicrosoftLoading(false)
     }
   }
 
@@ -292,6 +301,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
 
     setAuthLoading(true)
     setOtpError('')
+    clearPendingProviderIntent()
 
     try {
       const { data, error } = await supabase.auth.verifyOtp({
@@ -314,7 +324,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
       }
 
       localStorage.setItem('auth_token', accessToken)
-      onAuthSuccess(user)
+      onAuthSuccess(user, data?.session ?? null)
       onClose()
     } catch (error) {
       setOtpError(error.message || 'Verification failed. Please try again.')
@@ -400,6 +410,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                   setSignUpError('')
                   setOtpError('')
                   setGoogleError('')
+                  setMicrosoftError('')
                 }}
                 className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
                   activeTab === 'signin'
@@ -414,6 +425,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                   setActiveTab('signup')
                   setSignInError('')
                   setGoogleError('')
+                  setMicrosoftError('')
                 }}
                 className={`flex-1 py-2.5 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
                   activeTab === 'signup'
@@ -469,9 +481,9 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 <button
                   type="button"
                   onClick={handleGoogleAuth}
-                  disabled={authLoading || googleLoading}
+                  disabled={authLoading || googleLoading || microsoftLoading}
                   className={`w-full py-2.5 px-4 rounded-xl border text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${
-                    authLoading || googleLoading
+                    authLoading || googleLoading || microsoftLoading
                       ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
                       : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 cursor-pointer'
                   }`}
@@ -484,7 +496,26 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                   </svg>
                   {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
                 </button>
+                <button
+                  type="button"
+                  onClick={handleMicrosoftAuth}
+                  disabled={authLoading || googleLoading || microsoftLoading}
+                  className={`w-full py-2.5 px-4 rounded-xl border text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${
+                    authLoading || googleLoading || microsoftLoading
+                      ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 cursor-pointer'
+                  }`}
+                >
+                  <span className="grid grid-cols-2 gap-0.5 w-4 h-4" aria-hidden="true">
+                    <span className="bg-[#F25022] rounded-[1px]" />
+                    <span className="bg-[#7FBA00] rounded-[1px]" />
+                    <span className="bg-[#00A4EF] rounded-[1px]" />
+                    <span className="bg-[#FFB900] rounded-[1px]" />
+                  </span>
+                  {microsoftLoading ? 'Redirecting to Microsoft...' : 'Continue with Microsoft'}
+                </button>
                 {googleError && <p className="text-sm text-red-600 text-center">{googleError}</p>}
+                {microsoftError && <p className="text-sm text-red-600 text-center">{microsoftError}</p>}
                 {signInError && <p className="text-sm text-red-600 text-center">{signInError}</p>}
                 <p className="text-center text-sm text-slate-500">
                   {"Don't have an account? "}
@@ -494,6 +525,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                       setActiveTab('signup')
                       setSignInError('')
                       setGoogleError('')
+                      setMicrosoftError('')
                     }}
                     className="text-indigo-600 font-medium hover:text-indigo-700 cursor-pointer"
                   >
@@ -575,9 +607,9 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                 <button
                   type="button"
                   onClick={handleGoogleAuth}
-                  disabled={authLoading || googleLoading}
+                  disabled={authLoading || googleLoading || microsoftLoading}
                   className={`w-full py-2.5 px-4 rounded-xl border text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${
-                    authLoading || googleLoading
+                    authLoading || googleLoading || microsoftLoading
                       ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
                       : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 cursor-pointer'
                   }`}
@@ -590,7 +622,26 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                   </svg>
                   {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
                 </button>
+                <button
+                  type="button"
+                  onClick={handleMicrosoftAuth}
+                  disabled={authLoading || googleLoading || microsoftLoading}
+                  className={`w-full py-2.5 px-4 rounded-xl border text-sm font-semibold transition-colors flex items-center justify-center gap-2 ${
+                    authLoading || googleLoading || microsoftLoading
+                      ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 cursor-pointer'
+                  }`}
+                >
+                  <span className="grid grid-cols-2 gap-0.5 w-4 h-4" aria-hidden="true">
+                    <span className="bg-[#F25022] rounded-[1px]" />
+                    <span className="bg-[#7FBA00] rounded-[1px]" />
+                    <span className="bg-[#00A4EF] rounded-[1px]" />
+                    <span className="bg-[#FFB900] rounded-[1px]" />
+                  </span>
+                  {microsoftLoading ? 'Redirecting to Microsoft...' : 'Continue with Microsoft'}
+                </button>
                 {googleError && <p className="text-sm text-red-600 text-center">{googleError}</p>}
+                {microsoftError && <p className="text-sm text-red-600 text-center">{microsoftError}</p>}
                 {signUpError && <p className="text-sm text-red-600 text-center">{signUpError}</p>}
                 <p className="text-center text-sm text-slate-500">
                   Already have an account?{' '}
@@ -601,6 +652,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
                       setSignUpError('')
                       setOtpError('')
                       setGoogleError('')
+                      setMicrosoftError('')
                     }}
                     className="text-indigo-600 font-medium hover:text-indigo-700 cursor-pointer"
                   >

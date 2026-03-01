@@ -28,7 +28,14 @@ function clearAuthStorage() {
 
   const shouldClearKey = (key) => {
     if (!key) return false
-    return key === 'auth_token' || key.startsWith('sb-') || key.startsWith('supabase.')
+    return (
+      key === 'auth_token' ||
+      key === 'connecting_provider' ||
+      key === 'connecting_provider_started_at' ||
+      key.startsWith('mailpilot.') ||
+      key.startsWith('sb-') ||
+      key.startsWith('supabase.')
+    )
   }
 
   const localKeys = []

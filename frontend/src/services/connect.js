@@ -1,9 +1,19 @@
 import { getSupabase } from './supabaseClient'
 
+const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
+const CONNECTING_PROVIDER_STARTED_AT_KEY = 'connecting_provider_started_at'
+
 export async function startGoogleConnect() {
   const supabase = getSupabase()
   if (!supabase) {
     throw new Error('Missing Supabase env vars.')
+  }
+
+  localStorage.setItem('connecting_provider', 'google')
+  localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'gmail')
+  localStorage.setItem(CONNECTING_PROVIDER_STARTED_AT_KEY, String(Date.now()))
+  if (typeof window !== 'undefined') {
+    window.sessionStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'google')
   }
 
   const { error } = await supabase.auth.signInWithOAuth({
@@ -11,7 +21,7 @@ export async function startGoogleConnect() {
     options: {
       redirectTo: `${window.location.origin}/dashboard`,
       queryParams: {
-        prompt: 'select_account',
+        prompt: 'select_account consent',
       },
     },
   })
@@ -21,16 +31,29 @@ export async function startGoogleConnect() {
   }
 }
 
-export async function startMicrosoftConnect() {
+export async function startMicrosoftConnect(redirectTo = `${window.location.origin}/dashboard`, userInitiated = false) {
   const supabase = getSupabase()
   if (!supabase) {
     throw new Error('Missing Supabase env vars.')
+  }
+  if (!userInitiated) {
+    throw new Error('Microsoft OAuth must be started by an explicit user action.')
+  }
+
+  localStorage.setItem('connecting_provider', 'azure')
+  localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
+  localStorage.setItem(CONNECTING_PROVIDER_STARTED_AT_KEY, String(Date.now()))
+  if (typeof window !== 'undefined') {
+    window.sessionStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'azure')
   }
 
   const { error } = await supabase.auth.signInWithOAuth({
     provider: 'azure',
     options: {
-      redirectTo: `${window.location.origin}/dashboard`,
+      redirectTo,
+      queryParams: {
+        prompt: 'select_account',
+      },
     },
   })
 

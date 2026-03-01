@@ -1,12 +1,84 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import LandingPage from './LandingPage'
 import EmailDashboard from './EmailDashboard'
 import { apiFetch, clearStoredToken, setStoredToken } from './services/api'
 import { getMe, login, logout } from './services/auth'
 import { getSupabase } from './services/supabaseClient'
 
+const CONNECTING_PROVIDER_KEY = 'connecting_provider'
+const CONNECTING_PROVIDER_STARTED_AT_KEY = 'connecting_provider_started_at'
+const PROVIDER_TOKEN_STATUS_KEY = 'mailpilot.provider_token_status'
+const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
+const CONNECTING_PROVIDER_MAX_AGE_MS = 15 * 60 * 1000
+
 function getPageFromPath(pathname) {
   return pathname === '/dashboard' ? 'dashboard' : 'landing'
+}
+
+function readProviderTokenStatus() {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(PROVIDER_TOKEN_STATUS_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeProviderTokenStatus(provider, hasToken) {
+  if (typeof window === 'undefined') return
+  const next = readProviderTokenStatus()
+  const mailboxProvider =
+    provider === 'google' || provider === 'gmail'
+      ? 'gmail'
+      : provider === 'azure' || provider === 'microsoft' || provider === 'outlook'
+        ? 'outlook'
+        : null
+  if (!mailboxProvider) return
+  next[mailboxProvider] = Boolean(hasToken)
+  window.localStorage.setItem(PROVIDER_TOKEN_STATUS_KEY, JSON.stringify(next))
+}
+
+function normalizeConnectedProvider(provider) {
+  if (provider === 'google' || provider === 'gmail') return 'gmail'
+  if (provider === 'azure' || provider === 'microsoft' || provider === 'outlook') return 'outlook'
+  return null
+}
+
+function getBestIdentityEmail(user, normalizedProvider) {
+  if (!user) return null
+  if (normalizedProvider === 'gmail') {
+    const googleIdentity = user.identities?.find((identity) => identity?.provider === 'google')
+    return (
+      user.email ||
+      googleIdentity?.identity_data?.email ||
+      googleIdentity?.identity_data?.preferred_username ||
+      user?.user_metadata?.email ||
+      user?.user_metadata?.preferred_username ||
+      null
+    )
+  }
+
+  const microsoftIdentity = user.identities?.find(
+    (identity) => identity?.provider === 'azure' || identity?.provider === 'microsoft'
+  )
+  return (
+    user.email ||
+    microsoftIdentity?.identity_data?.email ||
+    microsoftIdentity?.identity_data?.preferred_username ||
+    user?.user_metadata?.email ||
+    user?.user_metadata?.preferred_username ||
+    null
+  )
+}
+
+function clearConnectingProviderIntent() {
+  if (typeof window === 'undefined') return
+  window.localStorage.removeItem(CONNECTING_PROVIDER_KEY)
+  window.localStorage.removeItem(CONNECTING_PROVIDER_STARTED_AT_KEY)
+  window.localStorage.removeItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
 }
 
 function ProtectedRoute({ canAccess, onDeny, children }) {
@@ -29,7 +101,34 @@ export default function App() {
   const [authEmail, setAuthEmail] = useState('')
   const [authLoading, setAuthLoading] = useState(false)
   const [authError, setAuthError] = useState('')
-  const hasSyncedConnectedAccount = useRef(false)
+  const [connectedAccountRows, setConnectedAccountRows] = useState([])
+
+  async function refreshConnectedAccountRows(supabase, userId) {
+    if (!supabase || !userId) {
+      setConnectedAccountRows([])
+      return
+    }
+
+    const { data, error } = await supabase
+      .from('connected_accounts')
+      .select('provider,email')
+      .eq('user_id', userId)
+
+    if (error) {
+      console.error('Failed to refresh connected accounts:', error)
+      return
+    }
+
+    const normalizedRows = (Array.isArray(data) ? data : [])
+      .map((row) => {
+        const provider = normalizeConnectedProvider(row?.provider)
+        if (!provider) return null
+        return { ...row, provider }
+      })
+      .filter(Boolean)
+
+    setConnectedAccountRows(normalizedRows)
+  }
 
   async function fetchAccounts(signal) {
     try {
@@ -80,6 +179,14 @@ export default function App() {
 
     async function syncSession() {
       try {
+        const hasCode = typeof window !== 'undefined' && new URL(window.location.href).searchParams.get('code')
+        if (hasCode) {
+          const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(window.location.href)
+          if (exchangeError) {
+            console.error('Failed to exchange OAuth code for session:', exchangeError)
+          }
+        }
+
         const { data, error } = await supabase.auth.getSession()
         if (cancelled) return
 
@@ -95,9 +202,11 @@ export default function App() {
 
         if (session?.access_token) {
           setStoredToken(session.access_token)
+          await refreshConnectedAccountRows(supabase, session.user?.id)
         } else {
           clearStoredToken()
           setAuthUser(null)
+          setConnectedAccountRows([])
         }
       } catch (error) {
         if (!cancelled) {
@@ -105,6 +214,7 @@ export default function App() {
           clearStoredToken()
           setAuthSession(null)
           setAuthUser(null)
+          setConnectedAccountRows([])
         }
       } finally {
         if (!cancelled) setAuthReady(true)
@@ -115,13 +225,24 @@ export default function App() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN') {
+        setAuthSession(session ?? null)
+        if (session?.access_token) {
+          setStoredToken(session.access_token)
+          refreshConnectedAccountRows(supabase, session.user?.id)
+        }
+        return
+      }
+
       setAuthSession(session ?? null)
       if (session?.access_token) {
         setStoredToken(session.access_token)
+        refreshConnectedAccountRows(supabase, session.user?.id)
       } else {
         clearStoredToken()
         setAuthUser(null)
+        setConnectedAccountRows([])
       }
     })
 
@@ -158,13 +279,7 @@ export default function App() {
   }, [authSession?.access_token])
 
   useEffect(() => {
-    if (!authSession?.access_token) {
-      hasSyncedConnectedAccount.current = false
-      return
-    }
-
-    if (hasSyncedConnectedAccount.current) return
-    hasSyncedConnectedAccount.current = true
+    if (!authSession?.access_token) return
 
     const supabase = getSupabase()
     if (!supabase) return
@@ -172,6 +287,19 @@ export default function App() {
     let cancelled = false
 
     async function saveConnectedAccount() {
+      const providerHint = localStorage.getItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
+      const startedAtRaw = localStorage.getItem(CONNECTING_PROVIDER_STARTED_AT_KEY)
+      if (!providerHint) {
+        console.error('Missing oauth_provider_hint. Skipping connected_accounts upsert.')
+        return
+      }
+
+      const startedAt = Number(startedAtRaw)
+      if (!Number.isFinite(startedAt) || Date.now() - startedAt > CONNECTING_PROVIDER_MAX_AGE_MS) {
+        clearConnectingProviderIntent()
+        return
+      }
+
       const { data, error } = await supabase.auth.getUser()
       if (cancelled) return
 
@@ -181,16 +309,29 @@ export default function App() {
       }
 
       const user = data?.user
-      const provider = user?.app_metadata?.provider
+      if (!user?.id) return
 
-      if (!user?.id || !provider) return
+      if (providerHint !== 'gmail' && providerHint !== 'outlook') {
+        console.error('Invalid oauth_provider_hint. Skipping connected_accounts upsert.', providerHint)
+        return
+      }
+      const accountEmail = getBestIdentityEmail(user, providerHint)
+
+      console.log('Connected account upsert payload:', {
+        userId: user.id,
+        email: user.email,
+        identities: user.identities,
+        provider: providerHint,
+      })
+
+      writeProviderTokenStatus(providerHint, true)
 
       const { error: upsertError } = await supabase.from('connected_accounts').upsert(
         [
           {
             user_id: user.id,
-            provider,
-            email: user.email ?? null,
+            provider: providerHint,
+            email: accountEmail,
           },
         ],
         { onConflict: 'user_id,provider' }
@@ -199,7 +340,11 @@ export default function App() {
       if (cancelled) return
       if (upsertError) {
         console.error('Failed to upsert connected account:', upsertError)
+        return
       }
+
+      await refreshConnectedAccountRows(supabase, user.id)
+      clearConnectingProviderIntent()
     }
 
     saveConnectedAccount()
@@ -207,7 +352,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [authSession?.access_token])
+  }, [authSession])
 
   useEffect(() => {
     function handlePopState() {
@@ -221,14 +366,14 @@ export default function App() {
   useEffect(() => {
     const controller = new AbortController()
 
-    if (authSession?.access_token && authUser) {
+    if (authSession?.access_token) {
       fetchAccounts(controller.signal)
     } else {
       setAccounts([])
     }
 
     return () => controller.abort()
-  }, [authSession?.access_token, authUser])
+  }, [authSession?.access_token])
 
   async function handleDevLogin() {
     if (!authEmail.trim()) {
@@ -256,10 +401,14 @@ export default function App() {
     setAuthError('')
   }
 
-  function handleAuthSuccess(user) {
+  function handleAuthSuccess(user, session = null) {
     if (user) {
       setAuthUser(user)
       setAuthError('')
+    }
+    if (session?.access_token) {
+      setAuthSession(session)
+      setStoredToken(session.access_token)
     }
     if (window.location.pathname !== '/dashboard') {
       window.history.pushState({}, '', '/dashboard')
@@ -299,7 +448,7 @@ export default function App() {
   if (currentPage === 'dashboard') {
     return (
       <ProtectedRoute canAccess={isAuthenticated} onDeny={redirectToLanding}>
-        <EmailDashboard onSignOut={handleSignOut} />
+        <EmailDashboard onSignOut={handleSignOut} connectedAccountRows={connectedAccountRows} />
       </ProtectedRoute>
     )
   }

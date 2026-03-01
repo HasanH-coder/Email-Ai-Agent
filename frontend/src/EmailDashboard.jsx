@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { startGoogleConnect, startMicrosoftConnect } from './services/connect'
+import { getSupabase } from './services/supabaseClient'
 
 // --- Mock Data ---
 const gmailEmails = [
@@ -133,6 +134,49 @@ const initialDrafts = [
 const EMAIL_STORAGE_KEYS = {
   gmail: 'mailpilot:gmailEmails',
   outlook: 'mailpilot:outlookEmails',
+}
+
+const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
+
+function mapOauthProviderToMailbox(provider) {
+  if (provider === 'google' || provider === 'gmail') return 'gmail'
+  if (provider === 'azure' || provider === 'outlook') return 'outlook'
+  return null
+}
+
+function readAndClearProviderHint(clear = false) {
+  if (typeof window === 'undefined') return null
+  const rawHint = window.sessionStorage.getItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
+  const mappedHint = mapOauthProviderToMailbox(rawHint)
+  if (clear && mappedHint) {
+    window.sessionStorage.removeItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
+  }
+  return mappedHint
+}
+
+function writeProviderTokenStatus(provider, hasToken) {
+  void provider
+  void hasToken
+}
+
+function getConnectedAccountState(rows) {
+  const nextConnectedAccounts = { gmail: false, outlook: false }
+  const nextConnectedEmails = { gmail: '', outlook: '' }
+
+  for (const account of rows ?? []) {
+    const mailboxProvider = mapOauthProviderToMailbox(account?.provider)
+    if (!mailboxProvider) continue
+    nextConnectedAccounts[mailboxProvider] = true
+    nextConnectedEmails[mailboxProvider] = account?.email || ''
+  }
+
+  return { nextConnectedAccounts, nextConnectedEmails }
+}
+
+function getFirstConnectedProvider(connectedAccounts) {
+  if (connectedAccounts.gmail) return 'gmail'
+  if (connectedAccounts.outlook) return 'outlook'
+  return null
 }
 
 function normalizeEmailPins(emails) {
@@ -1003,7 +1047,7 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
 
 
 // --- Main Dashboard ---
-export default function EmailDashboard({ onSignOut }) {
+export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [gmailEmailState, setGmailEmails] = useState(() =>
     loadEmailsFromStorage(EMAIL_STORAGE_KEYS.gmail, gmailEmails)
   )
@@ -1014,7 +1058,7 @@ export default function EmailDashboard({ onSignOut }) {
   const [sentEmails, setSentEmails] = useState([])
   const [emailThreads, setEmailThreads] = useState({})
   const [selectedSentEmailId, setSelectedSentEmailId] = useState(null)
-  const [selectedEmailId, setSelectedEmailId] = useState(gmailEmails[0].id)
+  const [selectedEmailId, setSelectedEmailId] = useState(null)
   const [activeFilter, setActiveFilter] = useState('all')
   const [activePage, setActivePage] = useState('inbox')
   const [activeProvider, setActiveProvider] = useState('gmail')
@@ -1027,8 +1071,10 @@ export default function EmailDashboard({ onSignOut }) {
   // Settings state
   const [signature, setSignature] = useState('')
   const [useSignature, setUseSignature] = useState(true)
-  const [connectedAccounts, setConnectedAccounts] = useState({ gmail: true, outlook: false })
-  const [connectedEmails, setConnectedEmails] = useState({ gmail: 'user@gmail.com', outlook: '' })
+  const [connectedAccounts, setConnectedAccounts] = useState({ gmail: false, outlook: false })
+  const [connectedEmails, setConnectedEmails] = useState({ gmail: '', outlook: '' })
+  const [fetchedConnectedAccountRows, setFetchedConnectedAccountRows] = useState([])
+  const [accountsLoading, setAccountsLoading] = useState(true)
 
   // Connect modal state
   const [connectModal, setConnectModal] = useState({ open: false, provider: null, fromInbox: false })
@@ -1057,6 +1103,9 @@ export default function EmailDashboard({ onSignOut }) {
   const gmailUnread = gmailEmailState.filter((e) => !e.read).length
   const outlookUnread = outlookEmailState.filter((e) => !e.read).length
   const totalUnread = gmailUnread + outlookUnread
+  const effectiveConnectedAccountRows = Array.isArray(connectedAccountRows)
+    ? connectedAccountRows
+    : fetchedConnectedAccountRows
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -1067,6 +1116,94 @@ export default function EmailDashboard({ onSignOut }) {
     if (typeof window === 'undefined') return
     window.localStorage.setItem(EMAIL_STORAGE_KEYS.outlook, JSON.stringify(outlookEmailState))
   }, [outlookEmailState])
+
+  useEffect(() => {
+    const supabase = getSupabase()
+    if (!supabase) {
+      setAccountsLoading(false)
+      return
+    }
+
+    let cancelled = false
+
+    async function loadConnectedAccounts() {
+      setAccountsLoading(true)
+      const { data: userData, error: userError } = await supabase.auth.getUser()
+      if (cancelled) return
+
+      if (userError) {
+        console.error('Failed to get current user for connected accounts:', userError)
+        setAccountsLoading(false)
+        return
+      }
+
+      const userId = userData?.user?.id
+      if (!userId) {
+        setFetchedConnectedAccountRows([])
+        setAccountsLoading(false)
+        return
+      }
+
+      const { data, error } = await supabase
+        .from('connected_accounts')
+        .select('provider,email')
+        .eq('user_id', userId)
+      if (cancelled) return
+
+      if (error) {
+        console.error('Failed to load connected accounts:', error)
+        setAccountsLoading(false)
+        return
+      }
+
+      setFetchedConnectedAccountRows(data ?? [])
+      setAccountsLoading(false)
+    }
+
+    loadConnectedAccounts()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    const { nextConnectedAccounts, nextConnectedEmails } = getConnectedAccountState(effectiveConnectedAccountRows)
+    setConnectedAccounts(nextConnectedAccounts)
+    setConnectedEmails(nextConnectedEmails)
+  }, [effectiveConnectedAccountRows])
+
+  useEffect(() => {
+    const { nextConnectedAccounts } = getConnectedAccountState(effectiveConnectedAccountRows)
+    const hintedProvider = readAndClearProviderHint(false)
+
+    if (hintedProvider && nextConnectedAccounts[hintedProvider]) {
+      if (activeProvider !== hintedProvider) {
+        setActiveProvider(hintedProvider)
+      }
+      readAndClearProviderHint(true)
+      return
+    }
+
+    if (!nextConnectedAccounts[activeProvider]) {
+      const fallbackProvider = getFirstConnectedProvider(nextConnectedAccounts)
+      if (fallbackProvider && fallbackProvider !== activeProvider) {
+        setActiveProvider(fallbackProvider)
+      }
+    }
+  }, [effectiveConnectedAccountRows, activeProvider])
+
+  useEffect(() => {
+    if (!connectedAccounts[activeProvider]) return
+
+    const providerEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
+    if (providerEmails.length === 0) return
+
+    const hasSelectedEmail = providerEmails.some((email) => email.id === selectedEmailId)
+    if (!hasSelectedEmail) {
+      setSelectedEmailId(providerEmails[0].id)
+    }
+  }, [activeProvider, connectedAccounts, gmailEmailState, outlookEmailState, selectedEmailId])
 
   function handleSelectEmail(id) {
     setSelectedEmailId(id)
@@ -1127,6 +1264,7 @@ export default function EmailDashboard({ onSignOut }) {
   }
 
   function handleConnect(provider, email) {
+    writeProviderTokenStatus(provider, true)
     setConnectedAccounts((prev) => ({ ...prev, [provider]: true }))
     setConnectedEmails((prev) => ({ ...prev, [provider]: email }))
     if (connectModal.fromInbox) {
@@ -1147,7 +1285,7 @@ export default function EmailDashboard({ onSignOut }) {
       if (provider === 'gmail') {
         await startGoogleConnect()
       } else {
-        await startMicrosoftConnect()
+        await startMicrosoftConnect(undefined, true)
       }
     } catch (error) {
       setConnectActionError(error?.message || 'Could not start account connection.')
@@ -1155,6 +1293,7 @@ export default function EmailDashboard({ onSignOut }) {
   }
 
   function handleDisconnect(provider) {
+    writeProviderTokenStatus(provider, false)
     setConnectedAccounts((prev) => ({ ...prev, [provider]: false }))
     setConnectedEmails((prev) => ({ ...prev, [provider]: '' }))
     if (activeProvider === provider) {
@@ -1528,6 +1667,7 @@ export default function EmailDashboard({ onSignOut }) {
               gmailUnread={gmailUnread}
               outlookUnread={outlookUnread}
               connectedAccounts={connectedAccounts}
+              accountsLoading={accountsLoading}
               onGenerateRequest={handleInboxGenerate}
               onDirectSendRequest={handleRequestDirectSend}
               onSendGeneratedRequest={handleSendGeneratedFromExpanded}
@@ -1684,6 +1824,7 @@ function InboxPage({
   gmailUnread,
   outlookUnread,
   connectedAccounts,
+  accountsLoading,
   onGenerateRequest,
   onDirectSendRequest,
   onSendGeneratedRequest,
@@ -1767,7 +1908,11 @@ function InboxPage({
 
         {/* Email List */}
         <div className="flex-1 overflow-y-auto">
-          {emails.length === 0 ? (
+          {accountsLoading ? (
+            <div className="flex flex-col items-center justify-center h-full text-slate-400 py-12">
+              <p className="text-sm font-medium">Loading...</p>
+            </div>
+          ) : emails.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-slate-400 py-12">
               <InboxIcon className="w-10 h-10 mb-3" />
               <p className="text-sm font-medium">No emails found</p>
