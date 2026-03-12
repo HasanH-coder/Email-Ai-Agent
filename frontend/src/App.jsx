@@ -76,6 +76,10 @@ function getBestIdentityEmail(user, normalizedProvider) {
 
 function clearConnectingProviderIntent() {
   if (typeof window === 'undefined') return
+  console.log(
+    'Clearing oauth_provider_hint:',
+    window.localStorage.getItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
+  )
   window.localStorage.removeItem(CONNECTING_PROVIDER_KEY)
   window.localStorage.removeItem(CONNECTING_PROVIDER_STARTED_AT_KEY)
   window.localStorage.removeItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
@@ -289,14 +293,17 @@ export default function App() {
     async function saveConnectedAccount() {
       const providerHint = localStorage.getItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
       const startedAtRaw = localStorage.getItem(CONNECTING_PROVIDER_STARTED_AT_KEY)
+      console.log('Reading oauth_provider_hint in saveConnectedAccount:', providerHint)
+      let shouldClearProviderIntent = Boolean(
+        providerHint || startedAtRaw || localStorage.getItem(CONNECTING_PROVIDER_KEY)
+      )
+      try {
       if (!providerHint) {
-        console.error('Missing oauth_provider_hint. Skipping connected_accounts upsert.')
         return
       }
 
       const startedAt = Number(startedAtRaw)
       if (!Number.isFinite(startedAt) || Date.now() - startedAt > CONNECTING_PROVIDER_MAX_AGE_MS) {
-        clearConnectingProviderIntent()
         return
       }
 
@@ -316,6 +323,11 @@ export default function App() {
         return
       }
       const accountEmail = getBestIdentityEmail(user, providerHint)
+      const {
+        data: { session },
+      } = await supabase.auth.getSession()
+      const accessToken = session?.provider_token
+      const refreshToken = session?.provider_refresh_token
 
       console.log('Connected account upsert payload:', {
         userId: user.id,
@@ -332,6 +344,8 @@ export default function App() {
             user_id: user.id,
             provider: providerHint,
             email: accountEmail,
+            provider_access_token: accessToken,
+            provider_refresh_token: refreshToken,
           },
         ],
         { onConflict: 'user_id,provider' }
@@ -344,7 +358,11 @@ export default function App() {
       }
 
       await refreshConnectedAccountRows(supabase, user.id)
-      clearConnectingProviderIntent()
+      } finally {
+        if (shouldClearProviderIntent) {
+          clearConnectingProviderIntent()
+        }
+      }
     }
 
     saveConnectedAccount()

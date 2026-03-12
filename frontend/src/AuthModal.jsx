@@ -6,7 +6,6 @@ function clearPendingProviderIntent() {
   if (typeof window === 'undefined') return
   window.localStorage.removeItem('connecting_provider')
   window.localStorage.removeItem('connecting_provider_started_at')
-  window.localStorage.removeItem('mailpilot.oauth_provider_hint')
 }
 
 export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab = 'signin' }) {
@@ -235,6 +234,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
     setSignInError('')
     setSignUpError('')
     try {
+      window.localStorage.setItem('mailpilot.oauth_provider_hint', 'gmail')
+      console.log('Setting oauth_provider_hint before Google OAuth click handler:', 'gmail')
       await startGoogleConnect()
     } catch (error) {
       console.error('Google OAuth unexpected error:', error)
@@ -250,6 +251,8 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
     setSignInError('')
     setSignUpError('')
     try {
+      window.localStorage.setItem('mailpilot.oauth_provider_hint', 'outlook')
+      console.log('Setting oauth_provider_hint before Microsoft OAuth click handler:', 'outlook')
       await startMicrosoftConnect(`${window.location.origin}/dashboard`, true)
     } catch (error) {
       console.error('Microsoft OAuth unexpected error:', error)

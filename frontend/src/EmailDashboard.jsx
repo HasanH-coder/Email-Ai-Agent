@@ -1283,8 +1283,12 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     setConnectActionError('')
     try {
       if (provider === 'gmail') {
+        window.localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'gmail')
+        console.log('Setting oauth_provider_hint before Gmail connect click handler:', 'gmail')
         await startGoogleConnect()
       } else {
+        window.localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
+        console.log('Setting oauth_provider_hint before Outlook connect click handler:', 'outlook')
         await startMicrosoftConnect(undefined, true)
       }
     } catch (error) {
