@@ -9,6 +9,8 @@ const accountRoutes = require('./routes/accountRoutes')
 const dbTestRoutes = require('./routes/dbTestRoutes')
 const authRoutes = require('./routes/authRoutes')
 const connectRoutes = require('./routes/connectRoutes')
+const emailRoutes = require('./routes/emailRoutes')
+const logoRoutes = require('./routes/logoRoutes')
 const errorHandler = require('./middleware/errorHandler')
 
 const app = express()
@@ -22,6 +24,8 @@ app.use('/api/accounts', accountRoutes)
 app.use('/api/db-test', dbTestRoutes)
 app.use('/api/auth', authRoutes)
 app.use('/api/connect', connectRoutes)
+app.use('/api/emails', emailRoutes)
+app.use('/api', logoRoutes)
 
 app.use(errorHandler)
 

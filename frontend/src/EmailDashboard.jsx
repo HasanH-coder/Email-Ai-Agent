@@ -3,69 +3,6 @@ import { startGoogleConnect, startMicrosoftConnect } from './services/connect'
 import { getSupabase } from './services/supabaseClient'
 
 // --- Mock Data ---
-const gmailEmails = [
-  {
-    id: 1,
-    sender: 'Alice Johnson',
-    email: 'alice.johnson@company.com',
-    subject: 'Q1 Marketing Strategy Review',
-    preview: 'Hi team, I wanted to share the updated marketing strategy for Q1. Please review the attached deck and...',
-    body: 'Hi team,\n\nI wanted to share the updated marketing strategy for Q1. Please review the attached deck and let me know your thoughts by Friday.\n\nKey highlights:\n- Social media budget increased by 20%\n- New influencer partnerships in the pipeline\n- Updated brand guidelines rolling out next week\n\nLet me know if you have any questions.\n\nBest,\nAlice',
-    time: '10:32 AM',
-    date: 'Feb 14, 2026',
-    read: false,
-    starred: false,
-    avatar: 'AJ',
-    avatarColor: 'bg-indigo-500',
-    provider: 'gmail',
-  },
-  {
-    id: 2,
-    sender: 'David Kim',
-    email: 'david.kim@startup.io',
-    subject: 'Follow-up: Partnership Proposal',
-    preview: 'Thanks for taking the time to meet yesterday. As discussed, I have attached the partnership proposal for...',
-    body: 'Hi,\n\nThanks for taking the time to meet yesterday. As discussed, I have attached the partnership proposal for your review.\n\nThe main terms include:\n- Revenue share: 70/30 split\n- Minimum commitment: 6 months\n- Dedicated support channel\n- Quarterly business reviews\n\nI believe this partnership could be mutually beneficial. Happy to hop on a call to discuss further.\n\nRegards,\nDavid',
-    time: '9:15 AM',
-    date: 'Feb 14, 2026',
-    read: false,
-    starred: true,
-    avatar: 'DK',
-    avatarColor: 'bg-emerald-500',
-    provider: 'gmail',
-  },
-  {
-    id: 3,
-    sender: 'Sarah Chen',
-    email: 'sarah.chen@design.co',
-    subject: 'New Design System Components',
-    preview: 'Hey! The new component library is ready for review. I have uploaded the Figma file and the Storybook link...',
-    body: 'Hey!\n\nThe new component library is ready for review. I have uploaded the Figma file and the Storybook link is live.\n\nNew components include:\n- Updated button variants\n- Card component with 3 sizes\n- Modal system with animations\n- Toast notifications\n\nFigma: https://figma.com/file/example\nStorybook: https://storybook.design.co\n\nLet me know what you think!\n\nCheers,\nSarah',
-    time: 'Yesterday',
-    date: 'Feb 13, 2026',
-    read: true,
-    starred: false,
-    avatar: 'SC',
-    avatarColor: 'bg-rose-500',
-    provider: 'gmail',
-  },
-  {
-    id: 4,
-    sender: 'Emily Watson',
-    email: 'emily.watson@hr.org',
-    subject: 'Team Offsite Planning - March',
-    preview: 'Hi everyone! Excited to announce that we are planning a team offsite for mid-March. Please fill out the...',
-    body: 'Hi everyone!\n\nExcited to announce that we are planning a team offsite for mid-March. Please fill out the preference survey by end of this week.\n\nOptions being considered:\n- Lake Tahoe retreat (3 days)\n- San Francisco workshop (2 days)\n- Virtual + local dinner combo\n\nSurvey link: https://forms.example/offsite-2026\n\nBudget per person: $500\n\nLooking forward to it!\n\nBest,\nEmily',
-    time: 'Mon',
-    date: 'Feb 10, 2026',
-    read: true,
-    starred: false,
-    avatar: 'EW',
-    avatarColor: 'bg-sky-500',
-    provider: 'gmail',
-  },
-]
-
 const outlookEmails = [
   {
     id: 101,
@@ -183,6 +120,159 @@ function normalizeEmailPins(emails) {
   return emails.map((email) => ({ ...email, pinned: Boolean(email.pinned) }))
 }
 
+function getAvatarFromSender(sender) {
+  const initials = (sender || 'GM')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || '')
+    .join('')
+
+  return initials || 'GM'
+}
+
+function formatEmailTimestamp(internalDate, fallbackDate = '') {
+  if (!internalDate) {
+    return { time: fallbackDate, date: fallbackDate }
+  }
+
+  const parsedDate = new Date(Number(internalDate))
+  if (Number.isNaN(parsedDate.getTime())) {
+    return { time: fallbackDate, date: fallbackDate }
+  }
+
+  return {
+    time: parsedDate.toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+    }),
+    date: parsedDate.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }),
+  }
+}
+
+function normalizeGmailEmail(email) {
+  const sender = email.fromName || email.fromEmail || email.from || 'Unknown Sender'
+  const senderEmail = email.fromEmail || ''
+  const { time, date } = formatEmailTimestamp(email.internalDate, email.date || '')
+  const labelIds = Array.isArray(email.labelIds) ? email.labelIds : []
+
+  return {
+    id: email.id,
+    sender,
+    email: senderEmail,
+    subject: email.subject || '(No Subject)',
+    preview: email.snippet || '',
+    bodyText: email.bodyText || '',
+    bodyHtml: email.bodyHtml || '',
+    time,
+    date,
+    internalDate: email.internalDate || null,
+    labelIds,
+    read: !labelIds.includes('UNREAD'),
+    starred: false,
+    avatar: getAvatarFromSender(sender),
+    avatarColor: 'bg-indigo-500',
+    provider: 'gmail',
+    pinned: false,
+    bodyLoaded: Boolean(email.bodyText || email.bodyHtml),
+  }
+}
+
+function normalizeGmailSentEmail(email) {
+  const { time } = formatEmailTimestamp(email.internalDate, email.date || '')
+
+  return {
+    id: email.id,
+    to: email.fromName || email.fromEmail || email.from || '',
+    subject: email.subject || '(No Subject)',
+    body: email.snippet || '',
+    time,
+    provider: 'gmail',
+  }
+}
+
+function normalizeGmailDraft(draft) {
+  const { time } = formatEmailTimestamp(draft.internalDate, draft.date || '')
+
+  return {
+    id: draft.id,
+    to: draft.to || '',
+    subject: draft.subject || '(No Subject)',
+    body: draft.snippet || '',
+    time,
+  }
+}
+
+function mergeEmailsById(existingEmails, nextEmails) {
+  const emailMap = new Map(existingEmails.map((email) => [email.id, email]))
+
+  for (const email of nextEmails) {
+    const previousEmail = emailMap.get(email.id)
+    if (!previousEmail) {
+      emailMap.set(email.id, email)
+      continue
+    }
+
+    const mergedEmail = { ...previousEmail, ...email }
+
+    // Preserve the fully loaded message body when a lighter inbox refresh arrives later.
+    if (previousEmail.bodyLoaded && !email.bodyLoaded) {
+      mergedEmail.bodyText = previousEmail.bodyText
+      mergedEmail.bodyHtml = previousEmail.bodyHtml
+      mergedEmail.bodyLoaded = previousEmail.bodyLoaded
+    }
+
+    const gmailReadOverrideUntil = recentGmailReadOverrides.get(email.id) || 0
+    if (previousEmail.provider === 'gmail' && previousEmail.read && !email.read && gmailReadOverrideUntil > Date.now()) {
+      mergedEmail.read = true
+      mergedEmail.labelIds = Array.isArray(previousEmail.labelIds)
+        ? previousEmail.labelIds.filter((label) => label !== 'UNREAD')
+        : []
+    }
+
+    emailMap.set(email.id, mergedEmail)
+  }
+
+  return Array.from(emailMap.values()).sort((a, b) => Number(b.internalDate || 0) - Number(a.internalDate || 0))
+}
+
+function buildEmailHtmlDocument(bodyHtml = '') {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <base target="_blank" rel="noopener noreferrer" />
+    <style>
+      body {
+        margin: 0;
+        padding: 16px;
+        font-family: Arial, sans-serif;
+        color: #0f172a;
+        background: #ffffff;
+        line-height: 1.5;
+        word-break: break-word;
+      }
+      img {
+        max-width: 100%;
+        height: auto;
+      }
+      table {
+        max-width: 100%;
+      }
+      a {
+        color: #2563eb;
+      }
+    </style>
+  </head>
+  <body>${bodyHtml}</body>
+</html>`
+}
+
 function loadEmailsFromStorage(storageKey, fallbackEmails) {
   const normalizedFallback = normalizeEmailPins(fallbackEmails)
   if (typeof window === 'undefined') return normalizedFallback
@@ -194,8 +284,156 @@ function loadEmailsFromStorage(storageKey, fallbackEmails) {
     if (!Array.isArray(parsed)) return normalizedFallback
     return normalizeEmailPins(parsed)
   } catch {
-    return normalizedFallback
+  return normalizedFallback
   }
+}
+
+function groupEmailsByDate(emails) {
+  const groups = []
+
+  for (const email of emails) {
+    const label = email.date || 'Unknown Date'
+    const lastGroup = groups[groups.length - 1]
+
+    if (lastGroup && lastGroup.label === label) {
+      lastGroup.emails.push(email)
+    } else {
+      groups.push({ label, emails: [email] })
+    }
+  }
+
+  return groups
+}
+
+function getDomainFromEmail(email = '') {
+  const normalizedEmail = email.trim().toLowerCase()
+  const atIndex = normalizedEmail.lastIndexOf('@')
+
+  if (atIndex === -1) return ''
+
+  return normalizedEmail.slice(atIndex + 1)
+}
+
+const GMAIL_AVATAR_DOMAIN_OVERRIDES = {
+  chatgpt: 'openai.com',
+  openai: 'openai.com',
+  linkedin: 'linkedin.com',
+  coursera: 'coursera.org',
+  icloud: 'icloud.com',
+  'deeplearning.ai': 'deeplearning.ai',
+}
+
+const gmailLogoUrlCache = new Map()
+const gmailLogoRequestCache = new Map()
+const recentGmailReadOverrides = new Map()
+
+function getGmailAvatarDomain(sender = '', senderEmail = '') {
+  const normalizedSender = sender.trim().toLowerCase()
+  const normalizedEmail = senderEmail.trim().toLowerCase()
+
+  for (const [key, domain] of Object.entries(GMAIL_AVATAR_DOMAIN_OVERRIDES)) {
+    if (normalizedSender.includes(key) || normalizedEmail.includes(key)) {
+      return domain
+    }
+  }
+
+  return getDomainFromEmail(senderEmail)
+}
+
+async function resolveGmailLogoUrl(domain) {
+  if (!domain) return null
+  if (gmailLogoUrlCache.has(domain)) {
+    return gmailLogoUrlCache.get(domain)
+  }
+  if (gmailLogoRequestCache.has(domain)) {
+    return gmailLogoRequestCache.get(domain)
+  }
+
+  const request = (async () => {
+    try {
+      const response = await fetch(`http://localhost:5001/api/logo?domain=${encodeURIComponent(domain)}`)
+      const responseData = await response.json()
+      const nextLogoUrl = response.ok ? (responseData.logoUrl || null) : null
+      console.log('[gmail-avatar] backend logo URL result:', { domain, logoUrl: nextLogoUrl, ok: response.ok })
+      gmailLogoUrlCache.set(domain, nextLogoUrl)
+      return nextLogoUrl
+    } catch {
+      console.log('[gmail-avatar] backend logo URL request failed:', { domain })
+      gmailLogoUrlCache.set(domain, null)
+      return null
+    } finally {
+      gmailLogoRequestCache.delete(domain)
+    }
+  })()
+
+  gmailLogoRequestCache.set(domain, request)
+  return request
+}
+
+function GmailAvatar({ sender = '', senderEmail, initials, sizeClass = 'w-9 h-9', textClass = 'text-xs', className = '' }) {
+  const domain = getGmailAvatarDomain(sender, senderEmail)
+  const fallbackLogoUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=64` : ''
+  const [resolvedLogoUrl, setResolvedLogoUrl] = useState(() => (domain ? (gmailLogoUrlCache.get(domain) || null) : null))
+  const [logoFailed, setLogoFailed] = useState(false)
+  const logoUrl = resolvedLogoUrl || fallbackLogoUrl
+
+  console.log('[gmail-avatar] resolving avatar:', {
+    sender,
+    senderEmail,
+    domain,
+    backendLogoUrl: resolvedLogoUrl,
+    fallbackGoogleFaviconUrl: fallbackLogoUrl || null,
+    finalLogoUrlUsed: logoFailed ? null : (logoUrl || null),
+  })
+
+  useEffect(() => {
+    let cancelled = false
+
+    setLogoFailed(false)
+    setResolvedLogoUrl(domain ? (gmailLogoUrlCache.get(domain) || null) : null)
+
+    if (!domain || gmailLogoUrlCache.has(domain)) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    resolveGmailLogoUrl(domain).then((nextLogoUrl) => {
+      if (!cancelled) {
+        setResolvedLogoUrl(nextLogoUrl)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [domain])
+
+  return (
+    <div className={`${sizeClass} rounded-full bg-white border border-slate-200 flex items-center justify-center shrink-0 overflow-hidden ${className}`}>
+      {logoUrl && !logoFailed ? (
+        <img
+          src={logoUrl}
+          alt=""
+          className="w-full h-full object-cover"
+          loading="lazy"
+          onError={() => {
+            console.log('[gmail-avatar] logo failed to load:', {
+              sender,
+              senderEmail,
+              domain,
+              attemptedLogoUrl: logoUrl,
+            })
+            setLogoFailed(true)
+          }}
+        />
+      ) : (
+        <div className={`w-full h-full rounded-full bg-indigo-500 flex items-center justify-center font-bold text-white ${textClass}`}>
+          {initials}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // --- Icons ---
@@ -574,6 +812,9 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
   const [aiEditPrompt, setAiEditPrompt] = useState('')
   const [manualBody, setManualBody] = useState('')
   const [composeMessage, setComposeMessage] = useState('')
+  const [isSending, setIsSending] = useState(false)
+  const [isClosing, setIsClosing] = useState(false)
+  const [draftSaveFailed, setDraftSaveFailed] = useState(false)
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const backdropRef = useRef(null)
   const attachmentButtonRef = useRef(null)
@@ -597,6 +838,9 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
       setGeneratedBody('')
       setAiEditPrompt('')
       setComposeMessage('')
+      setIsSending(false)
+      setIsClosing(false)
+      setDraftSaveFailed(false)
     } else {
       setTo('')
       setCc('')
@@ -609,11 +853,15 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
       setAiEditPrompt('')
       setManualBody('')
       setComposeMessage('')
+      setIsSending(false)
+      setIsClosing(false)
+      setDraftSaveFailed(false)
     }
   }, [isOpen, initialData])
 
   function handleBackdrop(e) {
-    if (e.target === backdropRef.current) handleClose()
+    if (isClosing || isSending) return
+    if (e.target === backdropRef.current) void handleClose()
   }
 
   function handleAddAttachment(type = 'attachment') {
@@ -654,20 +902,28 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     setComposeMessage('')
   }
 
-  function handleGenerateAndSend() {
+  async function handleGenerateAndSend() {
     if (!canGenerateInNewEmail) return
     const prompt = (isEditing && editMode === 'manual' ? manualBody : aiPrompt).trim() || subject || 'a professional email'
     const body = buildGeneratedBodyFromPrompt(prompt)
     if (onSendEmail) {
-      onSendEmail({
-        to,
-        cc,
-        subject,
-        body,
-        draftId: isEditing ? initialData?.id : null,
-      })
+      try {
+        setIsSending(true)
+        await onSendEmail({
+          to,
+          cc,
+          subject,
+          body,
+          draftId: isEditing ? initialData?.id : null,
+        })
+      } catch (error) {
+        setComposeMessage(error?.message || 'Failed to send email.')
+        setIsSending(false)
+        return
+      }
     }
-    handleClose()
+    setIsSending(false)
+    await handleClose({ saveDraft: false })
   }
 
   function handleAiRewrite() {
@@ -682,17 +938,25 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     setComposeMessage('')
   }
 
-  function handleSend() {
+  async function handleSend() {
     if (onSendEmail) {
-      onSendEmail({
-        to,
-        cc,
-        subject,
-        body: generatedBody || manualBody,
-        draftId: isEditing ? initialData?.id : null,
-      })
+      try {
+        setIsSending(true)
+        await onSendEmail({
+          to,
+          cc,
+          subject,
+          body: generatedBody || manualBody,
+          draftId: isEditing ? initialData?.id : null,
+        })
+      } catch (error) {
+        setComposeMessage(error?.message || 'Failed to send email.')
+        setIsSending(false)
+        return
+      }
     }
-    handleClose()
+    setIsSending(false)
+    await handleClose({ saveDraft: false })
   }
 
   function handleEdit() {
@@ -701,20 +965,54 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     setEditMode('manual')
   }
 
-  function handleClose() {
-    onClose()
-    setTo('')
-    setCc('')
-    setSubject('')
-    setAiPrompt('')
-    setAttachments([])
-    setStep('compose')
-    setGeneratedBody('')
-    setEditMode('manual')
-    setAiEditPrompt('')
-    setManualBody('')
-    setComposeMessage('')
-    setAttachmentMenuOpen(false)
+  async function handleClose(options = {}) {
+    if (isClosing || isSending) return
+
+    const draftBody = generatedBody || manualBody || aiPrompt
+    const hasDraftContent = Boolean(to.trim() || subject.trim() || draftBody.trim())
+    const shouldTrySave = options.saveDraft !== false && hasDraftContent && !draftSaveFailed
+
+    setIsClosing(true)
+
+    try {
+      if (onClose) {
+        const shouldClose = await onClose(
+          shouldTrySave
+            ? {
+                to,
+                subject,
+                body: draftBody,
+                draftId: isEditing ? initialData?.id : null,
+              }
+            : null
+        )
+
+        if (shouldClose === false) {
+          setIsClosing(false)
+          return
+        }
+      }
+
+      setTo('')
+      setCc('')
+      setSubject('')
+      setAiPrompt('')
+      setAttachments([])
+      setStep('compose')
+      setGeneratedBody('')
+      setEditMode('manual')
+      setAiEditPrompt('')
+      setManualBody('')
+      setComposeMessage('')
+      setAttachmentMenuOpen(false)
+      setIsSending(false)
+      setIsClosing(false)
+      setDraftSaveFailed(false)
+    } catch (error) {
+      setComposeMessage(error?.message || 'Failed to save Gmail draft.')
+      setIsClosing(false)
+      setDraftSaveFailed(true)
+    }
   }
 
   if (!isOpen) return null
@@ -735,8 +1033,13 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
             {step === 'review' ? 'Review Email' : isEditing ? 'Edit Draft' : 'New Email'}
           </h3>
           <button
-            onClick={handleClose}
-            className="w-8 h-8 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
+            onClick={() => void handleClose()}
+            disabled={isClosing || isSending}
+            className={`w-8 h-8 flex items-center justify-center rounded-full transition-colors ${
+              isClosing || isSending
+                ? 'text-slate-300 cursor-not-allowed'
+                : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer'
+            }`}
             aria-label="Close"
           >
             <XIcon className="w-4 h-4" />
@@ -884,16 +1187,21 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
               </button>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={handleClose}
-                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors cursor-pointer"
+                  onClick={() => void handleClose()}
+                  disabled={isClosing || isSending}
+                  className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${
+                    isClosing || isSending
+                      ? 'text-slate-400 bg-slate-200 cursor-not-allowed'
+                      : 'text-slate-700 bg-slate-100 hover:bg-slate-200 cursor-pointer'
+                  }`}
                 >
-                  Cancel
+                  {isClosing ? 'Saving...' : 'Cancel'}
                 </button>
                 {isEditing && editMode === 'manual' && (
                   <button
-                    onClick={() => {
-                      if (onSaveDraft) onSaveDraft({ to, subject, body: manualBody })
-                      handleClose()
+                    onClick={async () => {
+                      if (onSaveDraft) await onSaveDraft({ to, subject, body: manualBody })
+                      await handleClose({ saveDraft: false })
                     }}
                     className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-slate-700 bg-slate-200 rounded-xl hover:bg-slate-300 transition-colors cursor-pointer"
                   >
@@ -902,9 +1210,9 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
                 )}
                 <button
                   onClick={handleGenerate}
-                  disabled={!canGenerate}
+                  disabled={!canGenerate || isSending}
                   className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl transition-colors ${
-                    canGenerate
+                    canGenerate && !isSending
                       ? 'text-white bg-indigo-600 hover:bg-indigo-700 cursor-pointer'
                       : 'text-slate-400 bg-slate-200 cursor-not-allowed'
                   }`}
@@ -915,15 +1223,15 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
                 {!isEditing && (
                   <button
                     onClick={handleGenerateAndSend}
-                    disabled={!canGenerateInNewEmail}
+                    disabled={!canGenerateInNewEmail || isSending}
                     className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl transition-colors ${
-                      canGenerateInNewEmail
+                      canGenerateInNewEmail && !isSending
                         ? 'text-white bg-slate-700 hover:bg-slate-800 cursor-pointer'
                         : 'text-slate-400 bg-slate-200 cursor-not-allowed'
                     }`}
                   >
                     <SendIcon className="w-4 h-4" />
-                    Generate & Send
+                    {isSending ? 'Sending...' : 'Generate & Send'}
                   </button>
                 )}
               </div>
@@ -1029,10 +1337,15 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
               </button>
               <button
                 onClick={handleSend}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors cursor-pointer"
+                disabled={isSending}
+                className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl transition-colors ${
+                  isSending
+                    ? 'text-slate-400 bg-slate-200 cursor-not-allowed'
+                    : 'text-white bg-indigo-600 hover:bg-indigo-700 cursor-pointer'
+                }`}
               >
                 <SendIcon className="w-4 h-4" />
-                Send Email
+                {isSending ? 'Sending...' : 'Send Email'}
               </button>
             </div>
             {composeMessage && (
@@ -1048,9 +1361,9 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
 
 // --- Main Dashboard ---
 export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
-  const [gmailEmailState, setGmailEmails] = useState(() =>
-    loadEmailsFromStorage(EMAIL_STORAGE_KEYS.gmail, gmailEmails)
-  )
+  const [gmailEmailState, setGmailEmails] = useState([])
+  const [gmailDrafts, setGmailDrafts] = useState([])
+  const [gmailSentEmails, setGmailSentEmails] = useState([])
   const [outlookEmailState, setOutlookEmails] = useState(() =>
     loadEmailsFromStorage(EMAIL_STORAGE_KEYS.outlook, outlookEmails)
   )
@@ -1067,6 +1380,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [showComposeModal, setShowComposeModal] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [mobileShowDetail, setMobileShowDetail] = useState(false)
+  const [nextPageToken, setNextPageToken] = useState(null)
+  const [gmailLoading, setGmailLoading] = useState(false)
+  const [gmailLoadingMore, setGmailLoadingMore] = useState(false)
+  const [gmailHasMore, setGmailHasMore] = useState(false)
+  const [gmailInboxLoaded, setGmailInboxLoaded] = useState(false)
+  const [gmailInboxFullyLoaded, setGmailInboxFullyLoaded] = useState(false)
+  const [gmailDetailLoadingId, setGmailDetailLoadingId] = useState(null)
 
   // Settings state
   const [signature, setSignature] = useState('')
@@ -1092,17 +1412,16 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [aiGeneratedMeta, setAiGeneratedMeta] = useState(null)
   const [aiActionMessage, setAiActionMessage] = useState('')
   const [aiActionTone, setAiActionTone] = useState('error')
+  const gmailPageLoadRef = useRef(false)
+  const gmailDetailLoadRef = useRef(new Set())
 
-  const isActiveProviderConnected = connectedAccounts[activeProvider]
-  const currentEmails = isActiveProviderConnected
-    ? (activeProvider === 'gmail' ? gmailEmailState : outlookEmailState)
-    : []
+  const currentEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
+  const currentDrafts = activeProvider === 'gmail' ? gmailDrafts : drafts
+  const currentSentEmails = activeProvider === 'gmail' ? gmailSentEmails : sentEmails
   const setCurrentEmails = activeProvider === 'gmail' ? setGmailEmails : setOutlookEmails
   const selectedEmail = currentEmails.find((e) => e.id === selectedEmailId) || currentEmails[0]
+  const selectedEmailDetailLoading = activeProvider === 'gmail' && gmailDetailLoadingId === selectedEmail?.id
 
-  const gmailUnread = gmailEmailState.filter((e) => !e.read).length
-  const outlookUnread = outlookEmailState.filter((e) => !e.read).length
-  const totalUnread = gmailUnread + outlookUnread
   const effectiveConnectedAccountRows = Array.isArray(connectedAccountRows)
     ? connectedAccountRows
     : fetchedConnectedAccountRows
@@ -1116,6 +1435,250 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     if (typeof window === 'undefined') return
     window.localStorage.setItem(EMAIL_STORAGE_KEYS.outlook, JSON.stringify(outlookEmailState))
   }, [outlookEmailState])
+
+  const getGoogleProviderToken = useCallback(async () => {
+    const supabase = getSupabase()
+    if (!supabase) return null
+
+    const { data } = await supabase.auth.getSession()
+    return data?.session?.provider_token || null
+  }, [])
+
+  const createGmailDraft = useCallback(async ({ to, subject, body }) => {
+    const token = await getGoogleProviderToken()
+    if (!token) {
+      throw new Error('Missing Gmail provider token.')
+    }
+
+    const response = await fetch('http://localhost:5001/api/emails/gmail/drafts', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ to, subject, body }),
+    })
+    const responseData = await response.json()
+
+    if (!response.ok) {
+      throw new Error(responseData.gmail_error || responseData.message || 'Failed to create Gmail draft.')
+    }
+
+    return responseData
+  }, [getGoogleProviderToken])
+
+  const updateGmailDraft = useCallback(async (draftId, { to, subject, body }) => {
+    const token = await getGoogleProviderToken()
+    if (!token) {
+      throw new Error('Missing Gmail provider token.')
+    }
+
+    const response = await fetch(`http://localhost:5001/api/emails/gmail/drafts/${draftId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ to, subject, body }),
+    })
+    const responseData = await response.json()
+
+    if (!response.ok) {
+      throw new Error(responseData.gmail_error || responseData.message || 'Failed to update Gmail draft.')
+    }
+
+    return responseData
+  }, [getGoogleProviderToken])
+
+  const sendGmailDraft = useCallback(async (draftId) => {
+    const token = await getGoogleProviderToken()
+    if (!token) {
+      throw new Error('Missing Gmail provider token.')
+    }
+
+    const response = await fetch(`http://localhost:5001/api/emails/gmail/drafts/${draftId}/send`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+    const responseData = await response.json()
+
+    if (!response.ok) {
+      throw new Error(responseData.gmail_error || responseData.message || 'Failed to send Gmail draft.')
+    }
+
+    return responseData
+  }, [getGoogleProviderToken])
+
+  const deleteGmailDraft = useCallback(async (draftId) => {
+    const token = await getGoogleProviderToken()
+    if (!token) {
+      throw new Error('Missing Gmail provider token.')
+    }
+
+    const response = await fetch(`http://localhost:5001/api/emails/gmail/drafts/${draftId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    const responseData = await response.json()
+
+    if (!response.ok) {
+      throw new Error(responseData.gmail_error || responseData.message || 'Failed to delete Gmail draft.')
+    }
+
+    return responseData
+  }, [getGoogleProviderToken])
+
+  const fetchGmailEmailDetail = useCallback(async (emailId) => {
+    if (!emailId || gmailDetailLoadRef.current.has(emailId)) return
+
+    const token = await getGoogleProviderToken()
+    if (!token) return
+
+    gmailDetailLoadRef.current.add(emailId)
+    setGmailDetailLoadingId(emailId)
+
+    try {
+      const response = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      const responseData = await response.json()
+      console.log('GMAIL API RESPONSE:', responseData)
+
+      if (!response.ok) {
+        console.error('Failed to load Gmail email detail:', responseData)
+        return
+      }
+
+      const normalizedEmail = normalizeGmailEmail(responseData, 0)
+      setGmailEmails((prev) => mergeEmailsById(prev, [normalizedEmail]))
+    } catch (error) {
+      console.error('Failed to load Gmail email detail:', error)
+    } finally {
+      gmailDetailLoadRef.current.delete(emailId)
+      setGmailDetailLoadingId((currentId) => (currentId === emailId ? null : currentId))
+    }
+  }, [getGoogleProviderToken])
+
+  const fetchGmailEmailPage = useCallback(async (token, pageToken = null) => {
+    const params = new URLSearchParams({ maxResults: '25' })
+    if (pageToken) {
+      params.set('pageToken', pageToken)
+    }
+
+    const response = await fetch(`http://localhost:5001/api/emails/gmail?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    const responseData = await response.json()
+
+    if (!response.ok) {
+      throw new Error(responseData.gmail_error || responseData.message || 'Failed to load Gmail emails.')
+    }
+
+    return responseData
+  }, [])
+
+  const loadGmailEmails = useCallback(async ({ pageToken = null, append = false, silent = false } = {}) => {
+    if (gmailPageLoadRef.current) return
+
+    const token = await getGoogleProviderToken()
+    if (!token) {
+      setGmailEmails([])
+      setNextPageToken(null)
+      setGmailHasMore(false)
+      setGmailInboxLoaded(false)
+      setGmailInboxFullyLoaded(false)
+      return
+    }
+
+    gmailPageLoadRef.current = true
+    if (append) {
+      setGmailLoadingMore(true)
+    } else if (!silent) {
+      setGmailLoading(true)
+      setGmailInboxLoaded(false)
+      setGmailInboxFullyLoaded(false)
+      setNextPageToken(null)
+      setGmailHasMore(false)
+    }
+
+    let loadedAnyPage = false
+    let lastKnownNextPageToken = pageToken
+
+    try {
+      const responseData = await fetchGmailEmailPage(token, pageToken)
+      const newEmails = Array.isArray(responseData.emails) ? responseData.emails : []
+      const normalizedEmails = newEmails.map(normalizeGmailEmail)
+      const nextToken = responseData.nextPageToken || null
+
+      loadedAnyPage = true
+      lastKnownNextPageToken = nextToken
+
+      setGmailEmails((prev) => {
+        if (append) {
+          return mergeEmailsById(prev, normalizedEmails)
+        }
+
+        if (silent) {
+          return mergeEmailsById(prev, normalizedEmails)
+        }
+
+        return normalizedEmails
+      })
+      setNextPageToken(nextToken)
+      setGmailHasMore(Boolean(nextToken))
+      setGmailInboxLoaded(true)
+      setGmailInboxFullyLoaded(!nextToken)
+    } catch (error) {
+      console.error('Failed to load Gmail emails:', error)
+      if (!append && !silent && !loadedAnyPage) {
+        setGmailEmails([])
+        setGmailInboxLoaded(false)
+      }
+      setNextPageToken(lastKnownNextPageToken || null)
+      setGmailHasMore(Boolean(lastKnownNextPageToken))
+      setGmailInboxFullyLoaded(false)
+    } finally {
+      gmailPageLoadRef.current = false
+      setGmailLoading(false)
+      setGmailLoadingMore(false)
+    }
+  }, [fetchGmailEmailPage, getGoogleProviderToken])
+
+  const markGmailEmailReadState = useCallback(async (emailId, read) => {
+    const token = await getGoogleProviderToken()
+    if (!token || !emailId) return
+
+    try {
+      const response = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}/read`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ read }),
+      })
+      const responseData = await response.json()
+
+      if (!response.ok) {
+        if (responseData?.reconnectRequired) {
+          setConnectActionError('Gmail read sync needs new permissions. Disconnect and reconnect your Google account.')
+        }
+        throw new Error(responseData.gmail_error || responseData.message || 'Failed to sync Gmail read state.')
+      }
+    } catch (error) {
+      console.error('Failed to sync Gmail read state:', error)
+      void loadGmailEmails({ silent: true })
+    }
+  }, [getGoogleProviderToken, loadGmailEmails])
 
   useEffect(() => {
     const supabase = getSupabase()
@@ -1168,6 +1731,118 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }, [])
 
   useEffect(() => {
+    loadGmailEmails()
+  }, [loadGmailEmails])
+
+  useEffect(() => {
+    function refreshGmailSync() {
+      if (gmailLoading || gmailLoadingMore) return
+      if (document.visibilityState === 'visible') {
+        void loadGmailEmails({ silent: true })
+      }
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (gmailLoading || gmailLoadingMore) return
+      if (activeProvider === 'gmail' && gmailHasMore) return
+      if (document.visibilityState === 'visible') {
+        void loadGmailEmails({ silent: true })
+      }
+    }, 5000)
+
+    window.addEventListener('focus', refreshGmailSync)
+    document.addEventListener('visibilitychange', refreshGmailSync)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refreshGmailSync)
+      document.removeEventListener('visibilitychange', refreshGmailSync)
+    }
+  }, [activeProvider, gmailHasMore, gmailLoading, gmailLoadingMore, loadGmailEmails])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadGmailSentEmails() {
+      const token = await getGoogleProviderToken()
+      if (!token) {
+        if (!cancelled) setGmailSentEmails([])
+        return
+      }
+
+      try {
+        const response = await fetch('http://localhost:5001/api/emails/gmail/sent', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+        const responseData = await response.json()
+        if (cancelled) return
+
+        if (!response.ok) {
+          console.error('Failed to load Gmail sent emails:', responseData)
+          setGmailSentEmails([])
+          return
+        }
+
+        setGmailSentEmails(
+          Array.isArray(responseData.emails) ? responseData.emails.map(normalizeGmailSentEmail) : []
+        )
+      } catch (error) {
+        console.error('Failed to load Gmail sent emails:', error)
+        if (!cancelled) setGmailSentEmails([])
+      }
+    }
+
+    loadGmailSentEmails()
+
+    return () => {
+      cancelled = true
+    }
+  }, [getGoogleProviderToken])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadGmailDrafts() {
+      const token = await getGoogleProviderToken()
+      if (!token) {
+        if (!cancelled) setGmailDrafts([])
+        return
+      }
+
+      try {
+        const response = await fetch('http://localhost:5001/api/emails/gmail/drafts', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+        const responseData = await response.json()
+        if (cancelled) return
+
+        if (!response.ok) {
+          console.error('Failed to load Gmail drafts:', responseData)
+          setGmailDrafts([])
+          return
+        }
+
+        setGmailDrafts(
+          Array.isArray(responseData.drafts) ? responseData.drafts.map(normalizeGmailDraft) : []
+        )
+      } catch (error) {
+        console.error('Failed to load Gmail drafts:', error)
+        if (!cancelled) setGmailDrafts([])
+      }
+    }
+
+    loadGmailDrafts()
+
+    return () => {
+      cancelled = true
+    }
+  }, [getGoogleProviderToken])
+
+  useEffect(() => {
     const { nextConnectedAccounts, nextConnectedEmails } = getConnectedAccountState(effectiveConnectedAccountRows)
     setConnectedAccounts(nextConnectedAccounts)
     setConnectedEmails(nextConnectedEmails)
@@ -1194,8 +1869,15 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }, [effectiveConnectedAccountRows, activeProvider])
 
   useEffect(() => {
-    if (!connectedAccounts[activeProvider]) return
+    if (currentSentEmails.length === 0) return
 
+    const hasSelectedSentEmail = currentSentEmails.some((email) => email.id === selectedSentEmailId)
+    if (!hasSelectedSentEmail) {
+      setSelectedSentEmailId(currentSentEmails[0].id)
+    }
+  }, [currentSentEmails, selectedSentEmailId])
+
+  useEffect(() => {
     const providerEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
     if (providerEmails.length === 0) return
 
@@ -1207,6 +1889,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   function handleSelectEmail(id) {
     setSelectedEmailId(id)
+    const selectedCurrentEmail = currentEmails.find((email) => email.id === id)
     setCurrentEmails((prev) => prev.map((e) => (e.id === id ? { ...e, read: true } : e)))
     setMobileShowDetail(true)
     setAiPrompt('')
@@ -1214,6 +1897,17 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     setAiGeneratedMeta(null)
     setAiActionMessage('')
     setAiActionTone('error')
+
+    if (activeProvider === 'gmail') {
+      if (selectedCurrentEmail && !selectedCurrentEmail.read) {
+        recentGmailReadOverrides.set(id, Date.now() + 10000)
+        void markGmailEmailReadState(id, true)
+      }
+      const selectedGmailEmail = gmailEmailState.find((email) => email.id === id)
+      if (selectedGmailEmail && !selectedGmailEmail.bodyLoaded) {
+        void fetchGmailEmailDetail(id)
+      }
+    }
   }
 
   function handleToggleStar(id, e) {
@@ -1250,17 +1944,40 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }
 
   function handleProviderSwitch(provider) {
-    if (!connectedAccounts[provider]) {
+    const providerEmails = provider === 'gmail' ? gmailEmailState : outlookEmailState
+
+    if (!connectedAccounts[provider] && providerEmails.length === 0) {
       handleConnectStart(provider)
       return
     }
+
     setActiveProvider(provider)
-    const providerEmails = provider === 'gmail' ? gmailEmailState : outlookEmailState
     if (providerEmails.length > 0) {
       setSelectedEmailId(providerEmails[0].id)
     }
     setActiveFilter('all')
     setMobileShowDetail(false)
+  }
+
+  function handleGmailListScroll(event) {
+    if (activeProvider !== 'gmail' || !gmailHasMore || gmailLoading || gmailLoadingMore || !nextPageToken) {
+      return
+    }
+
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+
+    if (distanceFromBottom < 160) {
+      void loadGmailEmails({ pageToken: nextPageToken, append: true })
+    }
+  }
+
+  function handleLoadMoreGmailEmails() {
+    if (activeProvider !== 'gmail' || !gmailHasMore || gmailLoading || gmailLoadingMore || !nextPageToken) {
+      return
+    }
+
+    void loadGmailEmails({ pageToken: nextPageToken, append: true })
   }
 
   function handleConnect(provider, email) {
@@ -1310,20 +2027,39 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
   }
 
-  function handleDeleteDraft(id) {
-    setDrafts((prev) => prev.filter((d) => d.id !== id))
+  async function handleDeleteDraft(id) {
+    if (activeProvider === 'gmail') {
+      await deleteGmailDraft(id)
+      setGmailDrafts((prev) => prev.filter((d) => d.id !== id))
+    } else {
+      setDrafts((prev) => prev.filter((d) => d.id !== id))
+    }
     setDeletingDraftId(null)
   }
 
-  function handleSaveDraft(data) {
+  async function handleSaveDraft(data) {
     if (!editingDraft) return
-    setDrafts((prev) =>
-      prev.map((d) => (d.id === editingDraft.id ? { ...d, ...data } : d))
-    )
+
+    if (activeProvider === 'gmail') {
+      await updateGmailDraft(editingDraft.id, data)
+      const nextDraft = {
+        id: editingDraft.id,
+        to: data.to || '',
+        subject: data.subject || '(No Subject)',
+        body: data.body || '',
+        time: editingDraft.time,
+      }
+      setGmailDrafts((prev) => prev.map((d) => (d.id === editingDraft.id ? { ...d, ...nextDraft } : d)))
+    } else {
+      setDrafts((prev) =>
+        prev.map((d) => (d.id === editingDraft.id ? { ...d, ...data } : d))
+      )
+    }
+
     setEditingDraft(null)
   }
 
-  function handleSendEmail(data) {
+  async function handleSendEmail(data) {
     const now = new Date()
     const provider = data.provider || activeProvider
     const threadRootId = data.threadRootId || data.replyToId || null
@@ -1338,8 +2074,53 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       replyToId: data.replyToId || null,
       time: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
     }
-    setSentEmails((prev) => [sentEmail, ...prev])
-    setSelectedSentEmailId(sentEmail.id)
+
+    if (provider === 'gmail') {
+      let responseData
+
+      if (data.draftId) {
+        await updateGmailDraft(data.draftId, {
+          to: sentEmail.to,
+          subject: sentEmail.subject,
+          body: sentEmail.body,
+        })
+        responseData = await sendGmailDraft(data.draftId)
+      } else {
+        const token = await getGoogleProviderToken()
+        if (!token) {
+          throw new Error('Missing Gmail provider token.')
+        }
+
+        const response = await fetch('http://localhost:5001/api/emails/gmail/send', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            to: sentEmail.to,
+            subject: sentEmail.subject,
+            body: sentEmail.body,
+          }),
+        })
+        responseData = await response.json()
+
+        if (!response.ok) {
+          throw new Error(responseData.gmail_error || responseData.message || 'Failed to send Gmail email.')
+        }
+      }
+
+      const gmailSentEmail = {
+        ...sentEmail,
+        id: responseData.id || sentEmail.id,
+      }
+
+      setGmailSentEmails((prev) => [gmailSentEmail, ...prev])
+      setSelectedSentEmailId(gmailSentEmail.id)
+    } else {
+      setSentEmails((prev) => [sentEmail, ...prev])
+      setSelectedSentEmailId(sentEmail.id)
+    }
 
     if (threadRootId) {
       const threadReply = {
@@ -1357,8 +2138,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
 
     if (data.draftId) {
-      setDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
+      if (provider === 'gmail') {
+        setGmailDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
+      } else {
+        setDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
+      }
     }
+
+    return sentEmail
   }
 
   function buildInboxReply(promptText) {
@@ -1388,7 +2175,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return draft.id
   }
 
-  function handleInboxGenerate() {
+  async function handleInboxGenerate() {
     if (!aiPrompt.trim()) {
       setAiActionMessage('Please type a prompt first before you can generate or send the email.')
       setAiActionTone('error')
@@ -1402,18 +2189,40 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const payload = buildInboxReply(aiPrompt.trim())
     if (!payload) return
 
-    const draftId = saveDraftFromGeneratedEmail(payload)
-    setAiGeneratedEmail(payload.body)
-    setAiGeneratedMeta({
-      to: payload.to,
-      subject: payload.subject,
-      provider: payload.provider,
-      replyToId: payload.replyToId,
-      threadRootId: payload.threadRootId,
-      draftId,
-    })
-    setAiActionMessage('Email generated and saved to Drafts.')
-    setAiActionTone('success')
+    try {
+      let draftId = null
+
+      if (payload.provider === 'gmail') {
+        const responseData = await createGmailDraft(payload)
+        const createdDraft = normalizeGmailDraft({
+          id: responseData.id,
+          to: payload.to,
+          subject: payload.subject,
+          snippet: payload.body,
+          date: '',
+          internalDate: Date.now(),
+        })
+        draftId = responseData.id
+        setGmailDrafts((prev) => [createdDraft, ...prev.filter((draft) => draft.id !== draftId)])
+      } else {
+        draftId = saveDraftFromGeneratedEmail(payload)
+      }
+
+      setAiGeneratedEmail(payload.body)
+      setAiGeneratedMeta({
+        to: payload.to,
+        subject: payload.subject,
+        provider: payload.provider,
+        replyToId: payload.replyToId,
+        threadRootId: payload.threadRootId,
+        draftId,
+      })
+      setAiActionMessage('Email generated and saved to Drafts.')
+      setAiActionTone('success')
+    } catch (error) {
+      setAiActionMessage(error?.message || 'Failed to save draft.')
+      setAiActionTone('error')
+    }
   }
 
   function handleReplySelectedEmail() {
@@ -1488,28 +2297,33 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     })
   }
 
-  function handleSendGeneratedFromExpanded() {
+  async function handleSendGeneratedFromExpanded() {
     if (!aiGeneratedEmail.trim() || !aiGeneratedMeta) {
       setAiActionMessage('Generate an email first before sending.')
       setAiActionTone('error')
       return
     }
 
-    handleSendEmail({
-      to: aiGeneratedMeta.to,
-      subject: aiGeneratedMeta.subject,
-      body: aiGeneratedEmail.trim(),
-      provider: aiGeneratedMeta.provider,
-      replyToId: aiGeneratedMeta.replyToId,
-      threadRootId: aiGeneratedMeta.threadRootId,
-      draftId: aiGeneratedMeta.draftId || null,
-    })
+    try {
+      await handleSendEmail({
+        to: aiGeneratedMeta.to,
+        subject: aiGeneratedMeta.subject,
+        body: aiGeneratedEmail.trim(),
+        provider: aiGeneratedMeta.provider,
+        replyToId: aiGeneratedMeta.replyToId,
+        threadRootId: aiGeneratedMeta.threadRootId,
+        draftId: aiGeneratedMeta.draftId || null,
+      })
 
-    setAiPrompt('')
-    setAiGeneratedEmail('')
-    setAiGeneratedMeta(null)
-    setAiActionMessage('Email sent.')
-    setAiActionTone('success')
+      setAiPrompt('')
+      setAiGeneratedEmail('')
+      setAiGeneratedMeta(null)
+      setAiActionMessage('Email sent.')
+      setAiActionTone('success')
+    } catch (error) {
+      setAiActionMessage(error?.message || 'Failed to send email.')
+      setAiActionTone('error')
+    }
   }
 
   const filteredEmails = getFilteredEmails()
@@ -1517,9 +2331,9 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const selectedThreadReplies = selectedThreadRootId ? (emailThreads[selectedThreadRootId] || []) : []
 
   const navItems = [
-    { id: 'inbox', label: 'Inbox', icon: InboxIcon, badge: totalUnread },
-    { id: 'drafts', label: 'Drafts', icon: DraftIcon, badge: drafts.length },
-    { id: 'sent', label: 'Sent', icon: SentIcon, badge: sentEmails.length },
+    { id: 'inbox', label: 'Inbox', icon: InboxIcon },
+    { id: 'drafts', label: 'Drafts', icon: DraftIcon, badge: currentDrafts.length },
+    { id: 'sent', label: 'Sent', icon: SentIcon },
     { id: 'settings', label: 'Settings', icon: SettingsIcon },
   ]
 
@@ -1668,10 +2482,16 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               setMobileShowDetail={setMobileShowDetail}
               activeProvider={activeProvider}
               onProviderSwitch={handleProviderSwitch}
-              gmailUnread={gmailUnread}
-              outlookUnread={outlookUnread}
               connectedAccounts={connectedAccounts}
               accountsLoading={accountsLoading}
+              gmailLoading={gmailLoading}
+              gmailLoadingMore={gmailLoadingMore}
+              gmailHasMore={gmailHasMore}
+              gmailInboxLoaded={gmailInboxLoaded}
+              gmailInboxFullyLoaded={gmailInboxFullyLoaded}
+              selectedEmailDetailLoading={selectedEmailDetailLoading}
+              onEmailListScroll={handleGmailListScroll}
+              onLoadMoreEmails={handleLoadMoreGmailEmails}
               onGenerateRequest={handleInboxGenerate}
               onDirectSendRequest={handleRequestDirectSend}
               onSendGeneratedRequest={handleSendGeneratedFromExpanded}
@@ -1679,7 +2499,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           )}
           {activePage === 'drafts' && (
             <DraftsPage
-              drafts={drafts}
+              drafts={currentDrafts}
               onDeleteRequest={(id) => setDeletingDraftId(id)}
               onEditRequest={(draft) => {
                 setEditingDraft(draft)
@@ -1702,7 +2522,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           )}
           {activePage === 'sent' && (
             <SentPage
-              sentEmails={sentEmails}
+              sentEmails={currentSentEmails}
               selectedSentEmailId={selectedSentEmailId}
               onSelectSentEmail={setSelectedSentEmailId}
               gmailEmails={gmailEmailState}
@@ -1758,24 +2578,69 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         confirmLabel="Send Now"
         confirmClass="text-white bg-indigo-600 hover:bg-indigo-700"
         onCancel={() => setDirectSendModal({ open: false, payload: null })}
-        onConfirm={() => {
-          if (directSendModal.payload) {
-            handleSendEmail(directSendModal.payload)
+        onConfirm={async () => {
+          if (!directSendModal.payload) {
+            setDirectSendModal({ open: false, payload: null })
+            return
+          }
+
+          try {
+            await handleSendEmail(directSendModal.payload)
             setAiPrompt('')
             setAiGeneratedEmail('')
             setAiGeneratedMeta(null)
-            setAiActionMessage('')
+            setAiActionMessage('Email sent.')
+            setAiActionTone('success')
+          } catch (error) {
+            setAiActionMessage(error?.message || 'Failed to send email.')
             setAiActionTone('error')
           }
+
           setDirectSendModal({ open: false, payload: null })
         }}
       />
 
       <ComposeModal
         isOpen={showComposeModal}
-        onClose={() => {
+        onClose={async (draftData) => {
+          if (activeProvider === 'gmail') {
+            const hasDraftContent = Boolean(
+              draftData?.to?.trim() || draftData?.subject?.trim() || draftData?.body?.trim()
+            )
+
+            if (hasDraftContent) {
+              if (draftData?.draftId) {
+                await updateGmailDraft(draftData.draftId, draftData)
+                setGmailDrafts((prev) =>
+                  prev.map((draft) =>
+                    draft.id === draftData.draftId
+                      ? {
+                          ...draft,
+                          to: draftData.to || '',
+                          subject: draftData.subject || '(No Subject)',
+                          body: draftData.body || '',
+                        }
+                      : draft
+                  )
+                )
+              } else {
+                const responseData = await createGmailDraft(draftData)
+                const createdDraft = normalizeGmailDraft({
+                  id: responseData.id,
+                  to: draftData.to || '',
+                  subject: draftData.subject || '(No Subject)',
+                  snippet: draftData.body || '',
+                  date: '',
+                  internalDate: Date.now(),
+                })
+                setGmailDrafts((prev) => [createdDraft, ...prev])
+              }
+            }
+          }
+
           setShowComposeModal(false)
           setEditingDraft(null)
+          return true
         }}
         signature={signature}
         useSignature={useSignature}
@@ -1825,21 +2690,42 @@ function InboxPage({
   setMobileShowDetail,
   activeProvider,
   onProviderSwitch,
-  gmailUnread,
-  outlookUnread,
   connectedAccounts,
   accountsLoading,
+  gmailLoading,
+  gmailLoadingMore,
+  gmailHasMore,
+  gmailInboxLoaded,
+  gmailInboxFullyLoaded,
+  selectedEmailDetailLoading,
+  onEmailListScroll,
+  onLoadMoreEmails,
   onGenerateRequest,
   onDirectSendRequest,
   onSendGeneratedRequest,
 }) {
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const attachmentButtonRef = useRef(null)
+  const emailListRef = useRef(null)
+  const groupedEmails = activeProvider === 'gmail' ? groupEmailsByDate(emails) : []
   const filters = [
     { id: 'all', label: 'All' },
     { id: 'unread', label: 'Unread' },
     { id: 'starred', label: 'Starred' },
   ]
+
+  useEffect(() => {
+    if (activeProvider !== 'gmail' || !gmailInboxLoaded || !gmailHasMore || gmailLoading || gmailLoadingMore) {
+      return
+    }
+
+    const listElement = emailListRef.current
+    if (!listElement) return
+
+    if (listElement.scrollHeight <= listElement.clientHeight + 24) {
+      onLoadMoreEmails()
+    }
+  }, [activeProvider, emails.length, gmailHasMore, gmailInboxLoaded, gmailLoading, gmailLoadingMore, onLoadMoreEmails])
 
   return (
     <div className="flex h-full">
@@ -1864,9 +2750,6 @@ function InboxPage({
                 <path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" />
               </svg>
               Gmail
-              {gmailUnread > 0 && connectedAccounts.gmail && (
-                <span className="text-[10px] font-bold bg-red-500 text-white px-1.5 py-0.5 rounded-full leading-none">{gmailUnread}</span>
-              )}
               {!connectedAccounts.gmail && (
                 <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
               )}
@@ -1883,9 +2766,6 @@ function InboxPage({
                 <path d="M24 7.387v10.478c0 .23-.08.424-.238.576-.16.154-.352.23-.578.23h-8.26v-6.08L16.91 14l1.957-1.41v-2.534l-1.957 1.38L12.924 8.6V7.157h10.26c.226 0 .418.08.578.233.158.152.238.35.238.576v-.58zM14.078 5.07v14.64L0 17.488V3.293l14.078 1.778zm-2.89 4.252c-.533-.754-1.268-1.13-2.206-1.13-.918 0-1.654.386-2.2 1.16-.55.773-.822 1.772-.822 2.997 0 1.174.264 2.127.793 2.86.53.734 1.248 1.1 2.157 1.1.963 0 1.72-.37 2.27-1.113.55-.743.823-1.733.823-2.97 0-1.28-.272-2.284-.816-3.018v.114zm-1.16 5.057c-.267.477-.648.716-1.143.716-.486 0-.87-.245-1.15-.735-.28-.49-.42-1.14-.42-1.948 0-.84.14-1.506.42-1.998.282-.49.67-.737 1.168-.737.483 0 .863.24 1.142.72.278.48.418 1.142.418 1.985 0 .844-.145 1.52-.435 1.997z" />
               </svg>
               Outlook
-              {outlookUnread > 0 && connectedAccounts.outlook && (
-                <span className="text-[10px] font-bold bg-blue-500 text-white px-1.5 py-0.5 rounded-full leading-none">{outlookUnread}</span>
-              )}
               {!connectedAccounts.outlook && (
                 <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
               )}
@@ -1911,8 +2791,12 @@ function InboxPage({
         </div>
 
         {/* Email List */}
-        <div className="flex-1 overflow-y-auto">
-          {accountsLoading ? (
+        <div
+          ref={emailListRef}
+          className="flex-1 overflow-y-auto"
+          onScroll={activeProvider === 'gmail' ? onEmailListScroll : undefined}
+        >
+          {accountsLoading || (activeProvider === 'gmail' && gmailLoading) ? (
             <div className="flex flex-col items-center justify-center h-full text-slate-400 py-12">
               <p className="text-sm font-medium">Loading...</p>
             </div>
@@ -1921,6 +2805,69 @@ function InboxPage({
               <InboxIcon className="w-10 h-10 mb-3" />
               <p className="text-sm font-medium">No emails found</p>
             </div>
+          ) : activeProvider === 'gmail' ? (
+            groupedEmails.map((group) => (
+              <div key={group.label}>
+                <div className="sticky top-0 z-10 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400 bg-white/95 backdrop-blur border-b border-slate-100">
+                  {group.label}
+                </div>
+                {group.emails.map((email) => (
+                  <div
+                    key={email.id}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open email from ${email.sender}: ${email.subject}`}
+                    onClick={() => onSelectEmail(email.id)}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        onSelectEmail(email.id)
+                      }
+                    }}
+                    className={`w-full text-left px-4 py-3.5 border-b border-slate-50 flex items-start gap-3 transition-colors cursor-pointer ${
+                      email.id === selectedEmailId
+                        ? 'bg-indigo-50/70'
+                        : 'hover:bg-slate-50'
+                    }`}
+                  >
+                    <GmailAvatar
+                      sender={email.sender}
+                      senderEmail={email.email}
+                      initials={email.avatar}
+                      className="mt-0.5"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        {!email.read && (
+                          <span className="w-2 h-2 rounded-full bg-indigo-600 shrink-0" />
+                        )}
+                        <span className={`text-sm truncate ${email.read ? 'font-medium text-slate-700' : 'font-bold text-slate-900'}`}>
+                          {email.sender}
+                        </span>
+                        <span className="text-xs text-slate-400 ml-auto shrink-0">{email.time}</span>
+                      </div>
+                      <p className={`text-sm truncate mb-0.5 ${email.read ? 'text-slate-500' : 'font-semibold text-slate-800'}`}>
+                        {email.subject}
+                      </p>
+                      <p className="text-xs text-slate-400 truncate">{email.preview}</p>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onToggleStar(email.id, e)
+                      }}
+                      className={`shrink-0 mt-1 cursor-pointer transition-colors ${
+                        email.starred ? 'text-amber-400' : 'text-slate-300 hover:text-amber-400'
+                      }`}
+                      aria-label={email.starred ? 'Unstar' : 'Star'}
+                    >
+                      <StarIcon className="w-4 h-4" filled={email.starred} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ))
           ) : (
             emails.map((email) => (
               <div
@@ -1975,6 +2922,16 @@ function InboxPage({
               </div>
             ))
           )}
+          {activeProvider === 'gmail' && gmailLoadingMore && (
+            <div className="px-4 py-3 text-center text-xs font-medium text-slate-400">
+              Loading more emails...
+            </div>
+          )}
+          {activeProvider === 'gmail' && gmailInboxLoaded && gmailInboxFullyLoaded && !gmailHasMore && emails.length > 0 && (
+            <div className="px-4 py-3 text-center text-xs font-medium text-slate-300">
+              End of inbox
+            </div>
+          )}
         </div>
       </div>
 
@@ -1998,14 +2955,24 @@ function InboxPage({
                     <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
                   </svg>
                 </button>
-                <div className={`w-11 h-11 rounded-full ${selectedEmail.avatarColor} flex items-center justify-center text-sm font-bold text-white shrink-0`}>
-                  {selectedEmail.avatar}
-                </div>
+                {selectedEmail.provider === 'gmail' ? (
+                  <GmailAvatar
+                    sender={selectedEmail.sender}
+                    senderEmail={selectedEmail.email}
+                    initials={selectedEmail.avatar}
+                    sizeClass="w-11 h-11"
+                    textClass="text-sm"
+                  />
+                ) : (
+                  <div className={`w-11 h-11 rounded-full ${selectedEmail.avatarColor} flex items-center justify-center text-sm font-bold text-white shrink-0`}>
+                    {selectedEmail.avatar}
+                  </div>
+                )}
                 <div className="flex-1 min-w-0">
                   <h2 className="text-base font-bold text-slate-900 truncate">{selectedEmail.sender}</h2>
                   <p className="text-sm font-medium text-slate-600 truncate">{selectedEmail.subject}</p>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    {selectedEmail.email} &middot; {selectedEmail.date}
+                    {selectedEmail.email || selectedEmail.sender} &middot; {selectedEmail.date}
                   </p>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
@@ -2043,9 +3010,20 @@ function InboxPage({
 
             {/* Scrollable email body */}
             <div className="flex-1 overflow-y-auto px-6 py-5">
-              <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
-                {selectedEmail.body}
-              </pre>
+              {selectedEmailDetailLoading ? (
+                <p className="text-sm text-slate-400">Loading full message...</p>
+              ) : selectedEmail.bodyHtml ? (
+                <iframe
+                  title={`Email content for ${selectedEmail.subject}`}
+                  sandbox="allow-popups allow-popups-to-escape-sandbox"
+                  srcDoc={buildEmailHtmlDocument(selectedEmail.bodyHtml)}
+                  className="w-full min-h-[70vh] rounded-xl border border-slate-200 bg-white"
+                />
+              ) : (
+                <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
+                  {selectedEmail.bodyText || selectedEmail.preview || 'No message content available.'}
+                </pre>
+              )}
               {threadReplies.length > 0 && (
                 <div className="mt-6 space-y-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Thread Replies</p>
