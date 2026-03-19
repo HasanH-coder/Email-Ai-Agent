@@ -65,9 +65,9 @@ function getBestIdentityEmail(user, normalizedProvider) {
     (identity) => identity?.provider === 'azure' || identity?.provider === 'microsoft'
   )
   return (
-    user.email ||
     microsoftIdentity?.identity_data?.email ||
     microsoftIdentity?.identity_data?.preferred_username ||
+    user.email ||
     user?.user_metadata?.email ||
     user?.user_metadata?.preferred_username ||
     null
@@ -183,9 +183,13 @@ export default function App() {
 
     async function syncSession() {
       try {
-        const hasCode = typeof window !== 'undefined' && new URL(window.location.href).searchParams.get('code')
-        if (hasCode) {
-          const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(window.location.href)
+        const authCode =
+          typeof window !== 'undefined'
+            ? new URL(window.location.href).searchParams.get('code')
+            : null
+
+        if (authCode) {
+          const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(authCode)
           if (exchangeError) {
             console.error('Failed to exchange OAuth code for session:', exchangeError)
           }

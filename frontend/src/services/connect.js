@@ -55,7 +55,15 @@ export async function startMicrosoftConnect(redirectTo = `${window.location.orig
     provider: 'azure',
     options: {
       redirectTo,
-      scopes: 'email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read',
+      scopes: [
+        'openid',
+        'profile',
+        'email',
+        'offline_access',
+        'https://graph.microsoft.com/User.Read',
+        'https://graph.microsoft.com/Mail.Read',
+        'https://graph.microsoft.com/Mail.Send',
+      ].join(' '),
       queryParams: {
         prompt: 'consent',
       },

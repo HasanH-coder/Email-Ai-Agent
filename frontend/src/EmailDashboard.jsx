@@ -273,7 +273,8 @@ function buildEmailHtmlDocument(bodyHtml = '') {
 </html>`
 }
 
-function loadEmailsFromStorage(storageKey, fallbackEmails) {
+function loadEmailsFromStorage(storageKey, fallbackEmails, options = {}) {
+  const { useFallbackWhenEmpty = false } = options
   const normalizedFallback = normalizeEmailPins(fallbackEmails)
   if (typeof window === 'undefined') return normalizedFallback
 
@@ -282,9 +283,10 @@ function loadEmailsFromStorage(storageKey, fallbackEmails) {
     if (!raw) return normalizedFallback
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return normalizedFallback
+    if (useFallbackWhenEmpty && parsed.length === 0) return normalizedFallback
     return normalizeEmailPins(parsed)
   } catch {
-  return normalizedFallback
+    return normalizedFallback
   }
 }
 
@@ -1365,7 +1367,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [gmailDrafts, setGmailDrafts] = useState([])
   const [gmailSentEmails, setGmailSentEmails] = useState([])
   const [outlookEmailState, setOutlookEmails] = useState(() =>
-    loadEmailsFromStorage(EMAIL_STORAGE_KEYS.outlook, outlookEmails)
+    loadEmailsFromStorage(EMAIL_STORAGE_KEYS.outlook, outlookEmails, { useFallbackWhenEmpty: true })
   )
   const [drafts, setDrafts] = useState(initialDrafts)
   const [sentEmails, setSentEmails] = useState([])
@@ -1588,6 +1590,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   const loadGmailEmails = useCallback(async ({ pageToken = null, append = false, silent = false } = {}) => {
     if (gmailPageLoadRef.current) return
+    if (!connectedAccounts.gmail) {
+      setGmailEmails([])
+      setNextPageToken(null)
+      setGmailHasMore(false)
+      setGmailInboxLoaded(false)
+      setGmailInboxFullyLoaded(false)
+      return
+    }
 
     const token = await getGoogleProviderToken()
     if (!token) {
@@ -1651,7 +1661,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       setGmailLoading(false)
       setGmailLoadingMore(false)
     }
-  }, [fetchGmailEmailPage, getGoogleProviderToken])
+  }, [connectedAccounts.gmail, fetchGmailEmailPage, getGoogleProviderToken])
 
   const markGmailEmailReadState = useCallback(async (emailId, read) => {
     const token = await getGoogleProviderToken()
@@ -1764,6 +1774,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     let cancelled = false
 
     async function loadGmailSentEmails() {
+      if (!connectedAccounts.gmail) {
+        if (!cancelled) setGmailSentEmails([])
+        return
+      }
+
       const token = await getGoogleProviderToken()
       if (!token) {
         if (!cancelled) setGmailSentEmails([])
@@ -1799,12 +1814,17 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return () => {
       cancelled = true
     }
-  }, [getGoogleProviderToken])
+  }, [connectedAccounts.gmail, getGoogleProviderToken])
 
   useEffect(() => {
     let cancelled = false
 
     async function loadGmailDrafts() {
+      if (!connectedAccounts.gmail) {
+        if (!cancelled) setGmailDrafts([])
+        return
+      }
+
       const token = await getGoogleProviderToken()
       if (!token) {
         if (!cancelled) setGmailDrafts([])
@@ -1840,7 +1860,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return () => {
       cancelled = true
     }
-  }, [getGoogleProviderToken])
+  }, [connectedAccounts.gmail, getGoogleProviderToken])
 
   useEffect(() => {
     const { nextConnectedAccounts, nextConnectedEmails } = getConnectedAccountState(effectiveConnectedAccountRows)
