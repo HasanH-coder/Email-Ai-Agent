@@ -12,7 +12,9 @@ const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
 const CONNECTING_PROVIDER_MAX_AGE_MS = 15 * 60 * 1000
 
 function getPageFromPath(pathname) {
-  return pathname === '/dashboard' ? 'dashboard' : 'landing'
+  if (pathname === '/dashboard') return 'dashboard'
+  if (pathname === '/auth/callback') return 'auth-callback'
+  return 'landing'
 }
 
 function readProviderTokenStatus() {
@@ -183,12 +185,13 @@ export default function App() {
 
     async function syncSession() {
       try {
+        const currentPath = typeof window !== 'undefined' ? window.location.pathname : ''
         const authCode =
           typeof window !== 'undefined'
             ? new URL(window.location.href).searchParams.get('code')
             : null
 
-        if (authCode) {
+        if (currentPath === '/auth/callback' && authCode) {
           const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(authCode)
           if (exchangeError) {
             console.error('Failed to exchange OAuth code for session:', exchangeError)
@@ -206,23 +209,42 @@ export default function App() {
         }
 
         const session = data?.session ?? null
-        setAuthSession(session)
 
         if (session?.access_token) {
+          setAuthSession(session)
           setStoredToken(session.access_token)
           await refreshConnectedAccountRows(supabase, session.user?.id)
+          if (!cancelled && typeof window !== 'undefined' && currentPath === '/auth/callback') {
+            window.history.replaceState({}, '', '/dashboard')
+            setCurrentPage('dashboard')
+          }
+        } else if (currentPath === '/auth/callback' && authCode) {
+          // The OAuth code was present but getSession() returned null — this happens when
+          // Supabase's auto-detection (detectSessionInUrl) already consumed the PKCE
+          // code_verifier before our manual exchangeCodeForSession call, causing a race
+          // condition (common with Microsoft/Azure). Do NOT navigate to landing here;
+          // the onAuthStateChange SIGNED_IN event will fire once the exchange completes
+          // and will redirect to the dashboard.
         } else {
+          setAuthSession(null)
           clearStoredToken()
           setAuthUser(null)
           setConnectedAccountRows([])
+          if (!cancelled && typeof window !== 'undefined' && currentPath === '/auth/callback') {
+            window.history.replaceState({}, '', '/')
+            setCurrentPage('landing')
+          }
         }
       } catch (error) {
         if (!cancelled) {
-          console.error('Supabase session sync failed:', error)
           clearStoredToken()
           setAuthSession(null)
           setAuthUser(null)
           setConnectedAccountRows([])
+          if (typeof window !== 'undefined' && window.location.pathname === '/auth/callback') {
+            window.history.replaceState({}, '', '/')
+            setCurrentPage('landing')
+          }
         }
       } finally {
         if (!cancelled) setAuthReady(true)
@@ -239,6 +261,15 @@ export default function App() {
         if (session?.access_token) {
           setStoredToken(session.access_token)
           refreshConnectedAccountRows(supabase, session.user?.id)
+          // If still on the callback page (e.g. Microsoft race condition where syncSession
+          // couldn't get the session in time), navigate to the dashboard now.
+          if (!cancelled && typeof window !== 'undefined') {
+            const path = window.location.pathname
+            if (path === '/auth/callback' || path === '/') {
+              window.history.replaceState({}, '', '/dashboard')
+              setCurrentPage('dashboard')
+            }
+          }
         }
         return
       }
@@ -397,6 +428,17 @@ export default function App() {
     return () => controller.abort()
   }, [authSession?.access_token])
 
+  useEffect(() => {
+    if (!authReady || !authSession?.access_token) return
+    if (window.location.pathname === '/dashboard') {
+      setCurrentPage('dashboard')
+      return
+    }
+
+    window.history.replaceState({}, '', '/dashboard')
+    setCurrentPage('dashboard')
+  }, [authReady, authSession?.access_token])
+
   async function handleDevLogin() {
     if (!authEmail.trim()) {
       setAuthError('Email is required.')
@@ -464,6 +506,10 @@ export default function App() {
   const isAuthenticated = Boolean(authSession?.access_token)
 
   if (!authReady) {
+    return null
+  }
+
+  if (currentPage === 'auth-callback') {
     return null
   }
 

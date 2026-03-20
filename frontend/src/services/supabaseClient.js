@@ -11,7 +11,11 @@ export function getSupabase() {
   }
 
   if (!cachedClient) {
-    cachedClient = createClient(supabaseUrl, supabaseAnonKey)
+    cachedClient = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        flowType: 'pkce',
+      },
+    })
   }
   return cachedClient
 }

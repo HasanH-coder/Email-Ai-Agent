@@ -2,6 +2,11 @@ import { getSupabase } from './supabaseClient'
 
 const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
 const CONNECTING_PROVIDER_STARTED_AT_KEY = 'connecting_provider_started_at'
+const OAUTH_CALLBACK_PATH = '/auth/callback'
+
+function getOAuthRedirectUrl() {
+  return `${window.location.origin}${OAUTH_CALLBACK_PATH}`
+}
 
 export async function startGoogleConnect() {
   const supabase = getSupabase()
@@ -20,7 +25,7 @@ export async function startGoogleConnect() {
   const { error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
-      redirectTo: `${window.location.origin}/dashboard`,
+      redirectTo: getOAuthRedirectUrl(),
       scopes: 'openid email profile https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.compose',
       queryParams: {
         access_type: 'offline',
@@ -34,7 +39,7 @@ export async function startGoogleConnect() {
   }
 }
 
-export async function startMicrosoftConnect(redirectTo = `${window.location.origin}/dashboard`, userInitiated = false) {
+export async function startMicrosoftConnect(userInitiated = false) {
   const supabase = getSupabase()
   if (!supabase) {
     throw new Error('Missing Supabase env vars.')
@@ -48,13 +53,13 @@ export async function startMicrosoftConnect(redirectTo = `${window.location.orig
   localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
   localStorage.setItem(CONNECTING_PROVIDER_STARTED_AT_KEY, String(Date.now()))
   if (typeof window !== 'undefined') {
-    window.sessionStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'azure')
+    window.sessionStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
   }
 
   const { error } = await supabase.auth.signInWithOAuth({
     provider: 'azure',
     options: {
-      redirectTo,
+      redirectTo: getOAuthRedirectUrl(),
       scopes: [
         'openid',
         'profile',

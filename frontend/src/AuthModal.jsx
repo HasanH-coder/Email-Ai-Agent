@@ -253,7 +253,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, defaultTab =
     try {
       window.localStorage.setItem('mailpilot.oauth_provider_hint', 'outlook')
       console.log('Setting oauth_provider_hint before Microsoft OAuth click handler:', 'outlook')
-      await startMicrosoftConnect(`${window.location.origin}/dashboard`, true)
+      await startMicrosoftConnect(true)
     } catch (error) {
       console.error('Microsoft OAuth unexpected error:', error)
       setMicrosoftError(error.message || 'Microsoft OAuth failed.')

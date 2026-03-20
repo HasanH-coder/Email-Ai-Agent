@@ -2,54 +2,6 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { startGoogleConnect, startMicrosoftConnect } from './services/connect'
 import { getSupabase } from './services/supabaseClient'
 
-// --- Mock Data ---
-const outlookEmails = [
-  {
-    id: 101,
-    sender: 'Mike Peters',
-    email: 'mike.peters@engineering.dev',
-    subject: 'Deployment Pipeline Update',
-    preview: 'Quick heads up: we are migrating the CI/CD pipeline to GitHub Actions this weekend. No downtime expected...',
-    body: 'Quick heads up:\n\nWe are migrating the CI/CD pipeline to GitHub Actions this weekend. No downtime is expected, but please avoid merging to main between Saturday 10 PM and Sunday 6 AM.\n\nChanges:\n- Moving from Jenkins to GitHub Actions\n- Build times expected to improve by 40%\n- Auto-rollback on failed health checks\n- Slack notifications for deployment status\n\nDocs are updated here: https://docs.internal/ci-migration\n\nThanks,\nMike',
-    time: '11:00 AM',
-    date: 'Feb 14, 2026',
-    read: false,
-    starred: true,
-    avatar: 'MP',
-    avatarColor: 'bg-amber-500',
-    provider: 'outlook',
-  },
-  {
-    id: 102,
-    sender: 'Liam Brooks',
-    email: 'liam.brooks@sales.com',
-    subject: 'Client Demo Feedback',
-    preview: 'Great news! The client demo went really well. They were especially impressed with the AI features and...',
-    body: 'Great news!\n\nThe client demo went really well. They were especially impressed with the AI features and the dashboard analytics.\n\nKey takeaways:\n- They want a custom integration with their CRM\n- Timeline: kick-off in 2 weeks\n- Budget approved for Phase 1\n- Follow-up meeting scheduled for Thursday\n\nI will send over the detailed notes from the meeting shortly.\n\nCheers,\nLiam',
-    time: 'Yesterday',
-    date: 'Feb 13, 2026',
-    read: false,
-    starred: false,
-    avatar: 'LB',
-    avatarColor: 'bg-violet-500',
-    provider: 'outlook',
-  },
-  {
-    id: 103,
-    sender: 'Rachel Nguyen',
-    email: 'rachel.nguyen@finance.co',
-    subject: 'Budget Approval for Q2',
-    preview: 'Hi, the Q2 budget has been reviewed and approved by the finance committee. Please find the breakdown...',
-    body: 'Hi,\n\nThe Q2 budget has been reviewed and approved by the finance committee. Please find the breakdown below:\n\n- Engineering: $120,000\n- Marketing: $85,000\n- Operations: $60,000\n- R&D: $95,000\n\nPlease submit your itemized spending plans by March 1st.\n\nBest,\nRachel',
-    time: 'Mon',
-    date: 'Feb 10, 2026',
-    read: true,
-    starred: false,
-    avatar: 'RN',
-    avatarColor: 'bg-teal-500',
-    provider: 'outlook',
-  },
-]
 
 const initialDrafts = [
   {
@@ -204,6 +156,33 @@ function normalizeGmailDraft(draft) {
     subject: draft.subject || '(No Subject)',
     body: draft.snippet || '',
     time,
+  }
+}
+
+function normalizeOutlookEmail(email) {
+  const sender = email.fromName || email.fromEmail || email.from || 'Unknown Sender'
+  const senderEmail = email.fromEmail || ''
+  const internalDate = email.internalDate || (email.date ? new Date(email.date).getTime() : null)
+  const { time, date } = formatEmailTimestamp(internalDate, email.date || '')
+
+  return {
+    id: email.id,
+    sender,
+    email: senderEmail,
+    subject: email.subject || '(No Subject)',
+    preview: email.snippet || '',
+    bodyText: email.bodyText || '',
+    bodyHtml: email.bodyHtml || '',
+    time,
+    date,
+    internalDate,
+    read: Boolean(email.isRead),
+    starred: false,
+    avatar: getAvatarFromSender(sender),
+    avatarColor: 'bg-blue-500',
+    provider: 'outlook',
+    pinned: false,
+    bodyLoaded: Boolean(email.bodyText || email.bodyHtml),
   }
 }
 
@@ -1367,7 +1346,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [gmailDrafts, setGmailDrafts] = useState([])
   const [gmailSentEmails, setGmailSentEmails] = useState([])
   const [outlookEmailState, setOutlookEmails] = useState(() =>
-    loadEmailsFromStorage(EMAIL_STORAGE_KEYS.outlook, outlookEmails, { useFallbackWhenEmpty: true })
+    loadEmailsFromStorage(EMAIL_STORAGE_KEYS.outlook, [], { useFallbackWhenEmpty: false })
   )
   const [drafts, setDrafts] = useState(initialDrafts)
   const [sentEmails, setSentEmails] = useState([])
@@ -1389,6 +1368,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [gmailInboxLoaded, setGmailInboxLoaded] = useState(false)
   const [gmailInboxFullyLoaded, setGmailInboxFullyLoaded] = useState(false)
   const [gmailDetailLoadingId, setGmailDetailLoadingId] = useState(null)
+
+  // Outlook loading/pagination state
+  const [outlookLoading, setOutlookLoading] = useState(false)
+  const [outlookHasMore, setOutlookHasMore] = useState(false)
+  const [outlookNextSkipToken, setOutlookNextSkipToken] = useState(null)
+  const [outlookInboxLoaded, setOutlookInboxLoaded] = useState(false)
+  const [outlookDetailLoadingId, setOutlookDetailLoadingId] = useState(null)
 
   // Settings state
   const [signature, setSignature] = useState('')
@@ -1416,13 +1402,17 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [aiActionTone, setAiActionTone] = useState('error')
   const gmailPageLoadRef = useRef(false)
   const gmailDetailLoadRef = useRef(new Set())
+  const outlookPageLoadRef = useRef(false)
+  const outlookDetailLoadRef = useRef(new Set())
 
   const currentEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
   const currentDrafts = activeProvider === 'gmail' ? gmailDrafts : drafts
   const currentSentEmails = activeProvider === 'gmail' ? gmailSentEmails : sentEmails
   const setCurrentEmails = activeProvider === 'gmail' ? setGmailEmails : setOutlookEmails
   const selectedEmail = currentEmails.find((e) => e.id === selectedEmailId) || currentEmails[0]
-  const selectedEmailDetailLoading = activeProvider === 'gmail' && gmailDetailLoadingId === selectedEmail?.id
+  const selectedEmailDetailLoading =
+    (activeProvider === 'gmail' && gmailDetailLoadingId === selectedEmail?.id) ||
+    (activeProvider === 'outlook' && outlookDetailLoadingId === selectedEmail?.id)
 
   const effectiveConnectedAccountRows = Array.isArray(connectedAccountRows)
     ? connectedAccountRows
@@ -1690,6 +1680,137 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
   }, [getGoogleProviderToken, loadGmailEmails])
 
+  const getMicrosoftSupabaseToken = useCallback(async () => {
+    const supabase = getSupabase()
+    if (!supabase) return null
+    const { data } = await supabase.auth.getSession()
+    return data?.session?.access_token || null
+  }, [])
+
+  const loadOutlookEmails = useCallback(async ({ skipToken = null, append = false, silent = false } = {}) => {
+    if (outlookPageLoadRef.current) return
+    if (!connectedAccounts.outlook) {
+      setOutlookEmails([])
+      setOutlookNextSkipToken(null)
+      setOutlookHasMore(false)
+      setOutlookInboxLoaded(false)
+      return
+    }
+
+    const token = await getMicrosoftSupabaseToken()
+    if (!token) {
+      setOutlookEmails([])
+      setOutlookNextSkipToken(null)
+      setOutlookHasMore(false)
+      setOutlookInboxLoaded(false)
+      return
+    }
+
+    outlookPageLoadRef.current = true
+    if (!silent) {
+      setOutlookLoading(true)
+      if (!append) {
+        setOutlookInboxLoaded(false)
+        setOutlookNextSkipToken(null)
+        setOutlookHasMore(false)
+      }
+    }
+
+    try {
+      const params = new URLSearchParams({ maxResults: '25' })
+      if (skipToken) params.set('skipToken', skipToken)
+
+      const response = await fetch(`http://localhost:5001/api/emails/outlook?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const responseData = await response.json()
+
+      if (!response.ok) {
+        console.error('Failed to load Outlook emails:', responseData)
+        if (!append && !silent) {
+          setOutlookEmails([])
+          setOutlookInboxLoaded(false)
+        }
+        return
+      }
+
+      const newEmails = Array.isArray(responseData.emails) ? responseData.emails : []
+      const normalizedEmails = newEmails.map(normalizeOutlookEmail)
+      const nextSkipToken = responseData.nextSkipToken || null
+
+      setOutlookEmails((prev) => {
+        if (append || silent) return mergeEmailsById(prev, normalizedEmails)
+        return normalizedEmails
+      })
+      setOutlookNextSkipToken(nextSkipToken)
+      setOutlookHasMore(Boolean(nextSkipToken))
+      setOutlookInboxLoaded(true)
+    } catch (error) {
+      console.error('Failed to load Outlook emails:', error)
+      if (!append && !silent) {
+        setOutlookEmails([])
+        setOutlookInboxLoaded(false)
+      }
+    } finally {
+      outlookPageLoadRef.current = false
+      setOutlookLoading(false)
+    }
+  }, [connectedAccounts.outlook, getMicrosoftSupabaseToken])
+
+  const fetchOutlookEmailDetail = useCallback(async (emailId) => {
+    if (!emailId || outlookDetailLoadRef.current.has(emailId)) return
+
+    const token = await getMicrosoftSupabaseToken()
+    if (!token) return
+
+    outlookDetailLoadRef.current.add(emailId)
+    setOutlookDetailLoadingId(emailId)
+
+    try {
+      const response = await fetch(`http://localhost:5001/api/emails/outlook/${emailId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const responseData = await response.json()
+
+      if (!response.ok) {
+        console.error('Failed to load Outlook email detail:', responseData)
+        return
+      }
+
+      const normalizedEmail = normalizeOutlookEmail(responseData)
+      setOutlookEmails((prev) => mergeEmailsById(prev, [normalizedEmail]))
+    } catch (error) {
+      console.error('Failed to load Outlook email detail:', error)
+    } finally {
+      outlookDetailLoadRef.current.delete(emailId)
+      setOutlookDetailLoadingId((currentId) => (currentId === emailId ? null : currentId))
+    }
+  }, [getMicrosoftSupabaseToken])
+
+  const markOutlookEmailReadState = useCallback(async (emailId, read) => {
+    const token = await getMicrosoftSupabaseToken()
+    if (!token || !emailId) return
+
+    try {
+      const response = await fetch(`http://localhost:5001/api/emails/outlook/${emailId}/read`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ read }),
+      })
+      const responseData = await response.json()
+
+      if (!response.ok) {
+        throw new Error(responseData.message || 'Failed to sync Outlook read state.')
+      }
+    } catch (error) {
+      console.error('Failed to sync Outlook read state:', error)
+      void loadOutlookEmails({ silent: true })
+    }
+  }, [getMicrosoftSupabaseToken, loadOutlookEmails])
+
   useEffect(() => {
     const supabase = getSupabase()
     if (!supabase) {
@@ -1769,6 +1890,36 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       document.removeEventListener('visibilitychange', refreshGmailSync)
     }
   }, [activeProvider, gmailHasMore, gmailLoading, gmailLoadingMore, loadGmailEmails])
+
+  useEffect(() => {
+    loadOutlookEmails()
+  }, [loadOutlookEmails])
+
+  useEffect(() => {
+    function refreshOutlookSync() {
+      if (outlookLoading) return
+      if (document.visibilityState === 'visible') {
+        void loadOutlookEmails({ silent: true })
+      }
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (outlookLoading) return
+      if (activeProvider === 'outlook' && outlookHasMore) return
+      if (document.visibilityState === 'visible') {
+        void loadOutlookEmails({ silent: true })
+      }
+    }, 15000)
+
+    window.addEventListener('focus', refreshOutlookSync)
+    document.addEventListener('visibilitychange', refreshOutlookSync)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refreshOutlookSync)
+      document.removeEventListener('visibilitychange', refreshOutlookSync)
+    }
+  }, [activeProvider, outlookHasMore, outlookLoading, loadOutlookEmails])
 
   useEffect(() => {
     let cancelled = false
@@ -1927,6 +2078,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       if (selectedGmailEmail && !selectedGmailEmail.bodyLoaded) {
         void fetchGmailEmailDetail(id)
       }
+    } else if (activeProvider === 'outlook') {
+      if (selectedCurrentEmail && !selectedCurrentEmail.read) {
+        void markOutlookEmailReadState(id, true)
+      }
+      const selectedOutlookEmail = outlookEmailState.find((email) => email.id === id)
+      if (selectedOutlookEmail && !selectedOutlookEmail.bodyLoaded) {
+        void fetchOutlookEmailDetail(id)
+      }
     }
   }
 
@@ -2000,6 +2159,27 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     void loadGmailEmails({ pageToken: nextPageToken, append: true })
   }
 
+  function handleOutlookListScroll(event) {
+    if (activeProvider !== 'outlook' || !outlookHasMore || outlookLoading || !outlookNextSkipToken) {
+      return
+    }
+
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+
+    if (distanceFromBottom < 160) {
+      void loadOutlookEmails({ skipToken: outlookNextSkipToken, append: true })
+    }
+  }
+
+  function handleLoadMoreOutlookEmails() {
+    if (activeProvider !== 'outlook' || !outlookHasMore || outlookLoading || !outlookNextSkipToken) {
+      return
+    }
+
+    void loadOutlookEmails({ skipToken: outlookNextSkipToken, append: true })
+  }
+
   function handleConnect(provider, email) {
     writeProviderTokenStatus(provider, true)
     setConnectedAccounts((prev) => ({ ...prev, [provider]: true }))
@@ -2026,7 +2206,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       } else {
         window.localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
         console.log('Setting oauth_provider_hint before Outlook connect click handler:', 'outlook')
-        await startMicrosoftConnect(undefined, true)
+        await startMicrosoftConnect(true)
       }
     } catch (error) {
       setConnectActionError(error?.message || 'Could not start account connection.')
@@ -2509,9 +2689,12 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               gmailHasMore={gmailHasMore}
               gmailInboxLoaded={gmailInboxLoaded}
               gmailInboxFullyLoaded={gmailInboxFullyLoaded}
+              outlookLoading={outlookLoading}
+              outlookHasMore={outlookHasMore}
+              outlookInboxLoaded={outlookInboxLoaded}
               selectedEmailDetailLoading={selectedEmailDetailLoading}
-              onEmailListScroll={handleGmailListScroll}
-              onLoadMoreEmails={handleLoadMoreGmailEmails}
+              onEmailListScroll={activeProvider === 'outlook' ? handleOutlookListScroll : handleGmailListScroll}
+              onLoadMoreEmails={activeProvider === 'outlook' ? handleLoadMoreOutlookEmails : handleLoadMoreGmailEmails}
               onGenerateRequest={handleInboxGenerate}
               onDirectSendRequest={handleRequestDirectSend}
               onSendGeneratedRequest={handleSendGeneratedFromExpanded}
@@ -2717,6 +2900,9 @@ function InboxPage({
   gmailHasMore,
   gmailInboxLoaded,
   gmailInboxFullyLoaded,
+  outlookLoading,
+  outlookHasMore,
+  outlookInboxLoaded,
   selectedEmailDetailLoading,
   onEmailListScroll,
   onLoadMoreEmails,
@@ -2735,7 +2921,11 @@ function InboxPage({
   ]
 
   useEffect(() => {
-    if (activeProvider !== 'gmail' || !gmailInboxLoaded || !gmailHasMore || gmailLoading || gmailLoadingMore) {
+    if (activeProvider === 'gmail') {
+      if (!gmailInboxLoaded || !gmailHasMore || gmailLoading || gmailLoadingMore) return
+    } else if (activeProvider === 'outlook') {
+      if (!outlookInboxLoaded || !outlookHasMore || outlookLoading) return
+    } else {
       return
     }
 
@@ -2745,7 +2935,7 @@ function InboxPage({
     if (listElement.scrollHeight <= listElement.clientHeight + 24) {
       onLoadMoreEmails()
     }
-  }, [activeProvider, emails.length, gmailHasMore, gmailInboxLoaded, gmailLoading, gmailLoadingMore, onLoadMoreEmails])
+  }, [activeProvider, emails.length, gmailHasMore, gmailInboxLoaded, gmailLoading, gmailLoadingMore, outlookHasMore, outlookInboxLoaded, outlookLoading, onLoadMoreEmails])
 
   return (
     <div className="flex h-full">
@@ -2814,9 +3004,9 @@ function InboxPage({
         <div
           ref={emailListRef}
           className="flex-1 overflow-y-auto"
-          onScroll={activeProvider === 'gmail' ? onEmailListScroll : undefined}
+          onScroll={onEmailListScroll}
         >
-          {accountsLoading || (activeProvider === 'gmail' && gmailLoading) ? (
+          {accountsLoading || (activeProvider === 'gmail' && gmailLoading) || (activeProvider === 'outlook' && outlookLoading) ? (
             <div className="flex flex-col items-center justify-center h-full text-slate-400 py-12">
               <p className="text-sm font-medium">Loading...</p>
             </div>
@@ -2948,6 +3138,11 @@ function InboxPage({
             </div>
           )}
           {activeProvider === 'gmail' && gmailInboxLoaded && gmailInboxFullyLoaded && !gmailHasMore && emails.length > 0 && (
+            <div className="px-4 py-3 text-center text-xs font-medium text-slate-300">
+              End of inbox
+            </div>
+          )}
+          {activeProvider === 'outlook' && outlookInboxLoaded && !outlookHasMore && emails.length > 0 && (
             <div className="px-4 py-3 text-center text-xs font-medium text-slate-300">
               End of inbox
             </div>
