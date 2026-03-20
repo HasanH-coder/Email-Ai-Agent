@@ -3,27 +3,12 @@ import { startGoogleConnect, startMicrosoftConnect } from './services/connect'
 import { getSupabase } from './services/supabaseClient'
 
 
-const initialDrafts = [
-  {
-    id: 'd1',
-    to: 'alice.johnson@company.com',
-    subject: 'Re: Q1 Marketing Strategy Review',
-    body: 'Hi Alice,\n\nThanks for sharing. I have a few thoughts on the social media budget allocation. I think we should consider redirecting some funds toward content marketing as it showed stronger ROI last quarter.\n\nAlso, regarding the influencer partnerships - could we get a list of potential candidates to review before finalizing?\n\nLet me know when you are free to discuss.\n\nBest regards',
-    time: 'Feb 13, 2026',
-  },
-  {
-    id: 'd2',
-    to: 'team@company.com',
-    subject: 'Weekly Standup Notes',
-    body: 'Team,\n\nHere are the notes from this week:\n\n- Frontend: Completed dashboard redesign\n- Backend: API v2 migration at 80%\n- DevOps: New monitoring alerts set up\n\nBlockers:\n- Waiting on design review for mobile layouts\n- Need access to staging environment\n\nNext week focus:\n- Finalize API migration\n- Begin QA testing',
-    time: 'Feb 12, 2026',
-  },
-]
 
 const EMAIL_STORAGE_KEYS = {
   gmail: 'mailpilot:gmailEmails',
-  outlook: 'mailpilot:outlookEmails',
+  outlook: 'mailpilot:outlookEmails:v2',
 }
+
 
 const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
 
@@ -159,6 +144,32 @@ function normalizeGmailDraft(draft) {
   }
 }
 
+function normalizeOutlookSentEmail(email) {
+  const { time } = formatEmailTimestamp(email.internalDate, email.date || '')
+
+  return {
+    id: email.id,
+    to: email.to || '',
+    subject: email.subject || '(No Subject)',
+    body: email.snippet || '',
+    time,
+    provider: 'outlook',
+    conversationId: email.conversationId || email.id,
+  }
+}
+
+function normalizeOutlookDraft(draft) {
+  const { time } = formatEmailTimestamp(draft.internalDate, draft.date || '')
+
+  return {
+    id: draft.id,
+    to: draft.to || '',
+    subject: draft.subject || '(No Subject)',
+    body: draft.snippet || '',
+    time,
+  }
+}
+
 function normalizeOutlookEmail(email) {
   const sender = email.fromName || email.fromEmail || email.from || 'Unknown Sender'
   const senderEmail = email.fromEmail || ''
@@ -181,9 +192,41 @@ function normalizeOutlookEmail(email) {
     avatar: getAvatarFromSender(sender),
     avatarColor: 'bg-blue-500',
     provider: 'outlook',
-    pinned: false,
+    pinned: Boolean(email.flagged),
     bodyLoaded: Boolean(email.bodyText || email.bodyHtml),
+    conversationId: email.conversationId || email.id,
   }
+}
+
+function groupOutlookEmailsByThread(emails) {
+  const threadMap = new Map()
+  const threadOrder = []
+
+  for (const email of emails) {
+    const threadId = email.conversationId || email.id
+    if (!threadMap.has(threadId)) {
+      threadMap.set(threadId, [])
+      threadOrder.push(threadId)
+    }
+    threadMap.get(threadId).push(email)
+  }
+
+  return threadOrder.map((threadId) => {
+    const threadEmails = threadMap.get(threadId)
+    // Sort asc (oldest first) for the expanded view
+    const sorted = [...threadEmails].sort((a, b) => (a.internalDate || 0) - (b.internalDate || 0))
+    // Latest = email with highest internalDate (use reduce to avoid null-internalDate sorting bugs)
+    const latest = threadEmails.reduce((best, email) =>
+      (email.internalDate || 0) > (best.internalDate || 0) ? email : best,
+      threadEmails[0]
+    )
+    return {
+      conversationId: threadId,
+      emails: sorted,
+      latest,
+      count: sorted.length,
+    }
+  })
 }
 
 function mergeEmailsById(existingEmails, nextEmails) {
@@ -267,6 +310,20 @@ function loadEmailsFromStorage(storageKey, fallbackEmails, options = {}) {
   } catch {
     return normalizedFallback
   }
+}
+
+function groupOutlookThreadsByDate(threads) {
+  const groups = []
+  for (const thread of threads) {
+    const label = thread.latest.date || 'Unknown Date'
+    const lastGroup = groups[groups.length - 1]
+    if (lastGroup && lastGroup.label === label) {
+      lastGroup.threads.push(thread)
+    } else {
+      groups.push({ label, threads: [thread] })
+    }
+  }
+  return groups
 }
 
 function groupEmailsByDate(emails) {
@@ -582,6 +639,14 @@ function FolderIcon({ className }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 7.5A2.25 2.25 0 016 5.25h4.19c.597 0 1.17.237 1.591.659l.81.81c.422.422.994.659 1.591.659H18a2.25 2.25 0 012.25 2.25v6.75A2.25 2.25 0 0118 18.75H6a2.25 2.25 0 01-2.25-2.25V7.5z" />
+    </svg>
+  )
+}
+
+function ChevronRightIcon({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
     </svg>
   )
 }
@@ -1348,8 +1413,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [outlookEmailState, setOutlookEmails] = useState(() =>
     loadEmailsFromStorage(EMAIL_STORAGE_KEYS.outlook, [], { useFallbackWhenEmpty: false })
   )
-  const [drafts, setDrafts] = useState(initialDrafts)
-  const [sentEmails, setSentEmails] = useState([])
+  const [outlookDrafts, setOutlookDrafts] = useState([])
+  const [outlookSentEmails, setOutlookSentEmails] = useState([])
   const [emailThreads, setEmailThreads] = useState({})
   const [selectedSentEmailId, setSelectedSentEmailId] = useState(null)
   const [selectedEmailId, setSelectedEmailId] = useState(null)
@@ -1406,8 +1471,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const outlookDetailLoadRef = useRef(new Set())
 
   const currentEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
-  const currentDrafts = activeProvider === 'gmail' ? gmailDrafts : drafts
-  const currentSentEmails = activeProvider === 'gmail' ? gmailSentEmails : sentEmails
+  const currentDrafts = activeProvider === 'gmail' ? gmailDrafts : outlookDrafts
+  const currentSentEmails = activeProvider === 'gmail' ? gmailSentEmails : outlookSentEmails
   const setCurrentEmails = activeProvider === 'gmail' ? setGmailEmails : setOutlookEmails
   const selectedEmail = currentEmails.find((e) => e.id === selectedEmailId) || currentEmails[0]
   const selectedEmailDetailLoading =
@@ -1686,6 +1751,102 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const { data } = await supabase.auth.getSession()
     return data?.session?.access_token || null
   }, [])
+
+  const createOutlookDraft = useCallback(async ({ to, subject, body }) => {
+    const token = await getMicrosoftSupabaseToken()
+    if (!token) throw new Error('Missing Outlook token.')
+
+    const response = await fetch('http://localhost:5001/api/emails/outlook/drafts', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to, subject, body }),
+    })
+    const responseData = await response.json()
+    if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to create Outlook draft.')
+    return responseData
+  }, [getMicrosoftSupabaseToken])
+
+  const updateOutlookDraft = useCallback(async (draftId, { to, subject, body }) => {
+    const token = await getMicrosoftSupabaseToken()
+    if (!token) throw new Error('Missing Outlook token.')
+
+    const response = await fetch(`http://localhost:5001/api/emails/outlook/drafts/${draftId}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to, subject, body }),
+    })
+    const responseData = await response.json()
+    if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to update Outlook draft.')
+    return responseData
+  }, [getMicrosoftSupabaseToken])
+
+  const sendOutlookDraft = useCallback(async (draftId) => {
+    const token = await getMicrosoftSupabaseToken()
+    if (!token) throw new Error('Missing Outlook token.')
+
+    const response = await fetch(`http://localhost:5001/api/emails/outlook/drafts/${draftId}/send`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    const responseData = await response.json()
+    if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to send Outlook draft.')
+    return responseData
+  }, [getMicrosoftSupabaseToken])
+
+  const deleteOutlookDraft = useCallback(async (draftId) => {
+    const token = await getMicrosoftSupabaseToken()
+    if (!token) throw new Error('Missing Outlook token.')
+
+    const response = await fetch(`http://localhost:5001/api/emails/outlook/drafts/${draftId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    const responseData = await response.json()
+    if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to delete Outlook draft.')
+    return responseData
+  }, [getMicrosoftSupabaseToken])
+
+  // conversationId -> email[] (ASC order, full conversation messages)
+  const [outlookConversationMessages, setOutlookConversationMessages] = useState(new Map())
+  // Set of conversationIds currently being fetched
+  const [loadingConversationIds, setLoadingConversationIds] = useState(new Set())
+  // Set of conversationIds where the fetch failed
+  const [failedConversationIds, setFailedConversationIds] = useState(new Set())
+
+  const fetchOutlookConversation = useCallback(async (conversationId) => {
+    if (!conversationId) return
+    const token = await getMicrosoftSupabaseToken()
+    if (!token) return
+
+    setLoadingConversationIds((prev) => new Set([...prev, conversationId]))
+    setFailedConversationIds((prev) => { const next = new Set(prev); next.delete(conversationId); return next })
+
+    try {
+      const response = await fetch(
+        `http://localhost:5001/api/emails/outlook/conversation/${encodeURIComponent(conversationId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      const data = await response.json()
+      if (!response.ok) {
+        console.error('Conversation fetch error:', data)
+        setFailedConversationIds((prev) => new Set([...prev, conversationId]))
+        return
+      }
+
+      const messages = Array.isArray(data.messages) ? data.messages.map(normalizeOutlookEmail) : []
+      setOutlookConversationMessages((prev) => new Map([...prev, [conversationId, messages]]))
+      setOutlookEmails((prev) => mergeEmailsById(prev, messages))
+    } catch (error) {
+      console.error('Conversation fetch error:', error)
+      setFailedConversationIds((prev) => new Set([...prev, conversationId]))
+    } finally {
+      setLoadingConversationIds((prev) => {
+        const next = new Set(prev)
+        next.delete(conversationId)
+        return next
+      })
+    }
+  }, [getMicrosoftSupabaseToken])
 
   const loadOutlookEmails = useCallback(async ({ skipToken = null, append = false, silent = false } = {}) => {
     if (outlookPageLoadRef.current) return
@@ -2014,6 +2175,94 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }, [connectedAccounts.gmail, getGoogleProviderToken])
 
   useEffect(() => {
+    let cancelled = false
+
+    async function loadOutlookSentEmails() {
+      if (!connectedAccounts.outlook) {
+        if (!cancelled) setOutlookSentEmails([])
+        return
+      }
+
+      const token = await getMicrosoftSupabaseToken()
+      if (!token) {
+        if (!cancelled) setOutlookSentEmails([])
+        return
+      }
+
+      try {
+        const response = await fetch('http://localhost:5001/api/emails/outlook/sent', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const responseData = await response.json()
+        if (cancelled) return
+
+        if (!response.ok) {
+          console.error('Failed to load Outlook sent emails:', responseData)
+          setOutlookSentEmails([])
+          return
+        }
+
+        setOutlookSentEmails(
+          Array.isArray(responseData.emails) ? responseData.emails.map(normalizeOutlookSentEmail) : []
+        )
+      } catch (error) {
+        console.error('Failed to load Outlook sent emails:', error)
+        if (!cancelled) setOutlookSentEmails([])
+      }
+    }
+
+    loadOutlookSentEmails()
+
+    return () => {
+      cancelled = true
+    }
+  }, [connectedAccounts.outlook, getMicrosoftSupabaseToken])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadOutlookDrafts() {
+      if (!connectedAccounts.outlook) {
+        if (!cancelled) setOutlookDrafts([])
+        return
+      }
+
+      const token = await getMicrosoftSupabaseToken()
+      if (!token) {
+        if (!cancelled) setOutlookDrafts([])
+        return
+      }
+
+      try {
+        const response = await fetch('http://localhost:5001/api/emails/outlook/drafts', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const responseData = await response.json()
+        if (cancelled) return
+
+        if (!response.ok) {
+          console.error('Failed to load Outlook drafts:', responseData)
+          setOutlookDrafts([])
+          return
+        }
+
+        setOutlookDrafts(
+          Array.isArray(responseData.drafts) ? responseData.drafts.map(normalizeOutlookDraft) : []
+        )
+      } catch (error) {
+        console.error('Failed to load Outlook drafts:', error)
+        if (!cancelled) setOutlookDrafts([])
+      }
+    }
+
+    loadOutlookDrafts()
+
+    return () => {
+      cancelled = true
+    }
+  }, [connectedAccounts.outlook, getMicrosoftSupabaseToken])
+
+  useEffect(() => {
     const { nextConnectedAccounts, nextConnectedEmails } = getConnectedAccountState(effectiveConnectedAccountRows)
     setConnectedAccounts(nextConnectedAccounts)
     setConnectedEmails(nextConnectedEmails)
@@ -2083,7 +2332,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         void markOutlookEmailReadState(id, true)
       }
       const selectedOutlookEmail = outlookEmailState.find((email) => email.id === id)
-      if (selectedOutlookEmail && !selectedOutlookEmail.bodyLoaded) {
+      // Also fetch detail for emails that came from a conversation fetch (not originally in inbox state)
+      if (!selectedOutlookEmail || !selectedOutlookEmail.bodyLoaded) {
         void fetchOutlookEmailDetail(id)
       }
     }
@@ -2094,15 +2344,42 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     setCurrentEmails((prev) => prev.map((em) => (em.id === id ? { ...em, starred: !em.starred } : em)))
   }
 
-  function togglePin(id, e) {
+  async function handleTogglePin(id, e) {
     if (e) e.stopPropagation()
-    setCurrentEmails((prev) => prev.map((em) => (em.id === id ? { ...em, pinned: !em.pinned } : em)))
+    const email = outlookEmailState.find((em) => em.id === id)
+    if (!email) return
+    const nowPinned = !email.pinned
+    // Optimistic update
+    setOutlookEmails((prev) => prev.map((em) => (em.id === id ? { ...em, pinned: nowPinned } : em)))
+    setOutlookConversationMessages((prev) => {
+      const next = new Map(prev)
+      for (const [cid, msgs] of next) {
+        if (msgs.some((m) => m.id === id)) {
+          next.set(cid, msgs.map((m) => m.id === id ? { ...m, pinned: nowPinned } : m))
+        }
+      }
+      return next
+    })
+    // Sync to real Outlook — revert on failure
+    try {
+      const token = await getMicrosoftSupabaseToken()
+      if (!token) throw new Error('No token')
+      const res = await fetch(`http://localhost:5001/api/emails/outlook/${id}/flag`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flagged: nowPinned }),
+      })
+      if (!res.ok) throw new Error('Flag failed')
+    } catch {
+      setOutlookEmails((prev) => prev.map((em) => (em.id === id ? { ...em, pinned: !nowPinned } : em)))
+    }
   }
 
   function getFilteredEmails() {
     let filtered = currentEmails
     if (activeFilter === 'unread') filtered = filtered.filter((e) => !e.read)
     if (activeFilter === 'starred') filtered = filtered.filter((e) => e.starred)
+    if (activeFilter === 'pinned') filtered = filtered.filter((e) => e.pinned)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase()
       filtered = filtered.filter(
@@ -2232,7 +2509,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       await deleteGmailDraft(id)
       setGmailDrafts((prev) => prev.filter((d) => d.id !== id))
     } else {
-      setDrafts((prev) => prev.filter((d) => d.id !== id))
+      await deleteOutlookDraft(id)
+      setOutlookDrafts((prev) => prev.filter((d) => d.id !== id))
     }
     setDeletingDraftId(null)
   }
@@ -2251,9 +2529,15 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       }
       setGmailDrafts((prev) => prev.map((d) => (d.id === editingDraft.id ? { ...d, ...nextDraft } : d)))
     } else {
-      setDrafts((prev) =>
-        prev.map((d) => (d.id === editingDraft.id ? { ...d, ...data } : d))
-      )
+      await updateOutlookDraft(editingDraft.id, data)
+      const nextDraft = {
+        id: editingDraft.id,
+        to: data.to || '',
+        subject: data.subject || '(No Subject)',
+        body: data.body || '',
+        time: editingDraft.time,
+      }
+      setOutlookDrafts((prev) => prev.map((d) => (d.id === editingDraft.id ? { ...d, ...nextDraft } : d)))
     }
 
     setEditingDraft(null)
@@ -2318,8 +2602,60 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       setGmailSentEmails((prev) => [gmailSentEmail, ...prev])
       setSelectedSentEmailId(gmailSentEmail.id)
     } else {
-      setSentEmails((prev) => [sentEmail, ...prev])
+      const token = await getMicrosoftSupabaseToken()
+      if (!token) throw new Error('Missing Outlook token.')
+
+      if (data.draftId) {
+        await updateOutlookDraft(data.draftId, {
+          to: sentEmail.to,
+          subject: sentEmail.subject,
+          body: sentEmail.body,
+        })
+        await sendOutlookDraft(data.draftId)
+      } else {
+        const response = await fetch('http://localhost:5001/api/emails/outlook/send', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: sentEmail.to, subject: sentEmail.subject, body: sentEmail.body }),
+        })
+        const responseData = await response.json()
+        if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to send Outlook email.')
+      }
+
+      setOutlookSentEmails((prev) => [sentEmail, ...prev])
       setSelectedSentEmailId(sentEmail.id)
+
+      // If replying in a thread, show the sent reply immediately in the conversation
+      if (data.conversationId) {
+        const optimisticReply = {
+          id: sentEmail.id,
+          sender: 'You',
+          email: '',
+          subject: sentEmail.subject,
+          preview: sentEmail.body.substring(0, 150),
+          bodyText: sentEmail.body,
+          bodyHtml: '',
+          time: now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+          date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          internalDate: now.getTime(),
+          read: true,
+          starred: false,
+          avatar: 'Me',
+          avatarColor: 'bg-indigo-500',
+          provider: 'outlook',
+          pinned: false,
+          bodyLoaded: true,
+          conversationId: data.conversationId,
+        }
+        setOutlookConversationMessages((prev) => {
+          const existing = prev.get(data.conversationId) || []
+          const withoutThis = existing.filter((e) => e.id !== optimisticReply.id)
+          return new Map([...prev, [data.conversationId, [...withoutThis, optimisticReply]]])
+        })
+        setOutlookEmails((prev) => mergeEmailsById(prev, [optimisticReply]))
+        // Re-fetch the full conversation after a moment to get the real sent email from Graph API
+        setTimeout(() => { fetchOutlookConversation(data.conversationId) }, 2000)
+      }
     }
 
     if (threadRootId) {
@@ -2341,7 +2677,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       if (provider === 'gmail') {
         setGmailDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
       } else {
-        setDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
+        setOutlookDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
       }
     }
 
@@ -2359,20 +2695,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       provider: selectedEmail.provider || activeProvider,
       replyToId: selectedEmail.id,
       threadRootId: selectedEmail.threadRootId || selectedEmail.id,
+      conversationId: selectedEmail.conversationId || null,
     }
-  }
-
-  function saveDraftFromGeneratedEmail(payload) {
-    const now = new Date()
-    const draft = {
-      id: 'd' + now.getTime(),
-      to: payload.to,
-      subject: payload.subject,
-      body: payload.body,
-      time: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-    }
-    setDrafts((prev) => [draft, ...prev])
-    return draft.id
   }
 
   async function handleInboxGenerate() {
@@ -2405,7 +2729,17 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         draftId = responseData.id
         setGmailDrafts((prev) => [createdDraft, ...prev.filter((draft) => draft.id !== draftId)])
       } else {
-        draftId = saveDraftFromGeneratedEmail(payload)
+        const responseData = await createOutlookDraft(payload)
+        const createdDraft = normalizeOutlookDraft({
+          id: responseData.id,
+          to: payload.to,
+          subject: payload.subject,
+          snippet: payload.body,
+          date: '',
+          internalDate: Date.now(),
+        })
+        draftId = responseData.id
+        setOutlookDrafts((prev) => [createdDraft, ...prev.filter((draft) => draft.id !== draftId)])
       }
 
       setAiGeneratedEmail(payload.body)
@@ -2668,7 +3002,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               setActiveFilter={setActiveFilter}
               onSelectEmail={handleSelectEmail}
               onToggleStar={handleToggleStar}
-              onTogglePin={togglePin}
+              onTogglePin={handleTogglePin}
               onReplyEmail={handleReplySelectedEmail}
               threadReplies={selectedThreadReplies}
               aiPrompt={aiPrompt}
@@ -2698,6 +3032,10 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               onGenerateRequest={handleInboxGenerate}
               onDirectSendRequest={handleRequestDirectSend}
               onSendGeneratedRequest={handleSendGeneratedFromExpanded}
+              outlookConversationMessages={outlookConversationMessages}
+              loadingConversationIds={loadingConversationIds}
+              failedConversationIds={failedConversationIds}
+              onLoadConversation={fetchOutlookConversation}
             />
           )}
           {activePage === 'drafts' && (
@@ -2730,6 +3068,10 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               onSelectSentEmail={setSelectedSentEmailId}
               gmailEmails={gmailEmailState}
               outlookEmails={outlookEmailState}
+              activeProvider={activeProvider}
+              outlookConversationMessages={outlookConversationMessages}
+              loadingConversationIds={loadingConversationIds}
+              onLoadConversation={fetchOutlookConversation}
             />
           )}
         </div>
@@ -2806,11 +3148,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       <ComposeModal
         isOpen={showComposeModal}
         onClose={async (draftData) => {
-          if (activeProvider === 'gmail') {
-            const hasDraftContent = Boolean(
-              draftData?.to?.trim() || draftData?.subject?.trim() || draftData?.body?.trim()
-            )
+          const hasDraftContent = Boolean(
+            draftData?.to?.trim() || draftData?.subject?.trim() || draftData?.body?.trim()
+          )
 
+          if (activeProvider === 'gmail') {
             if (hasDraftContent) {
               if (draftData?.draftId) {
                 await updateGmailDraft(draftData.draftId, draftData)
@@ -2838,6 +3180,37 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
                 })
                 setGmailDrafts((prev) => [createdDraft, ...prev])
               }
+            }
+          } else if (activeProvider === 'outlook') {
+            if (hasDraftContent) {
+              if (draftData?.draftId) {
+                await updateOutlookDraft(draftData.draftId, draftData)
+                setOutlookDrafts((prev) =>
+                  prev.map((draft) =>
+                    draft.id === draftData.draftId
+                      ? {
+                          ...draft,
+                          to: draftData.to || '',
+                          subject: draftData.subject || '(No Subject)',
+                          body: draftData.body || '',
+                        }
+                      : draft
+                  )
+                )
+              } else {
+                const responseData = await createOutlookDraft(draftData)
+                const createdDraft = normalizeOutlookDraft({
+                  id: responseData.id,
+                  to: draftData.to || '',
+                  subject: draftData.subject || '(No Subject)',
+                  snippet: draftData.body || '',
+                  date: '',
+                  internalDate: Date.now(),
+                })
+                setOutlookDrafts((prev) => [createdDraft, ...prev])
+              }
+              setAiActionMessage('Draft saved to Outlook.')
+              setAiActionTone('success')
             }
           }
 
@@ -2909,15 +3282,42 @@ function InboxPage({
   onGenerateRequest,
   onDirectSendRequest,
   onSendGeneratedRequest,
+  outlookConversationMessages,
+  loadingConversationIds,
+  failedConversationIds,
+  onLoadConversation,
 }) {
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
+  const [expandedThreadIds, setExpandedThreadIds] = useState(new Set())
   const attachmentButtonRef = useRef(null)
   const emailListRef = useRef(null)
   const groupedEmails = activeProvider === 'gmail' ? groupEmailsByDate(emails) : []
+  const outlookThreads = activeProvider === 'outlook' ? groupOutlookEmailsByThread(emails) : []
+  const groupedOutlookThreads = activeProvider === 'outlook' ? groupOutlookThreadsByDate(outlookThreads) : []
+
+  function toggleThread(conversationId, e) {
+    e.stopPropagation()
+    const isCurrentlyExpanded = expandedThreadIds.has(conversationId)
+    // Trigger fetch before updating state (outside the state setter — no side effects in updaters)
+    if (!isCurrentlyExpanded && !outlookConversationMessages?.has(conversationId) && !loadingConversationIds?.has(conversationId)) {
+      onLoadConversation?.(conversationId)
+    }
+    setExpandedThreadIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(conversationId)) {
+        next.delete(conversationId)
+      } else {
+        next.add(conversationId)
+      }
+      return next
+    })
+  }
   const filters = [
     { id: 'all', label: 'All' },
     { id: 'unread', label: 'Unread' },
-    { id: 'starred', label: 'Starred' },
+    activeProvider === 'outlook'
+      ? { id: 'pinned', label: 'Pinned' }
+      : { id: 'starred', label: 'Starred' },
   ]
 
   useEffect(() => {
@@ -3079,56 +3479,140 @@ function InboxPage({
               </div>
             ))
           ) : (
-            emails.map((email) => (
-              <div
-                key={email.id}
-                role="button"
-                tabIndex={0}
-                aria-label={`Open email from ${email.sender}: ${email.subject}`}
-                onClick={() => onSelectEmail(email.id)}
-                onKeyDown={(e) => {
-                  if (e.target !== e.currentTarget) return
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    onSelectEmail(email.id)
-                  }
-                }}
-                className={`w-full text-left px-4 py-3.5 border-b border-slate-50 flex items-start gap-3 transition-colors cursor-pointer ${
-                  email.id === selectedEmailId
-                    ? 'bg-indigo-50/70'
-                    : 'hover:bg-slate-50'
-                }`}
-              >
-                <div className={`w-9 h-9 rounded-full ${email.avatarColor} flex items-center justify-center text-xs font-bold text-white shrink-0 mt-0.5`}>
-                  {email.avatar}
+            groupedOutlookThreads.map((group) => (
+              <div key={group.label}>
+                <div className="sticky top-0 z-10 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400 bg-white/95 backdrop-blur border-b border-slate-100">
+                  {group.label}
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5">
-                    {!email.read && (
-                      <span className="w-2 h-2 rounded-full bg-indigo-600 shrink-0" />
+                {group.threads.map((thread) => {
+              const isExpanded = expandedThreadIds.has(thread.conversationId)
+              const isLoading = loadingConversationIds?.has(thread.conversationId)
+              const isFailed = failedConversationIds?.has(thread.conversationId)
+              const conversationMsgs = outlookConversationMessages?.get(thread.conversationId)
+              // Use fetched full conversation if it has messages; otherwise show inbox emails we already have
+              const expandedEmails = (conversationMsgs?.length > 0) ? conversationMsgs : thread.emails
+              const threadCount = (conversationMsgs?.length > 0) ? conversationMsgs.length : thread.count
+              const hasMultiple = thread.count > 1
+              const latest = thread.latest
+
+              return (
+                <div key={thread.conversationId}>
+                  {/* Thread header row */}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open email from ${latest.sender}: ${latest.subject}`}
+                    onClick={() => onSelectEmail(latest.id)}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return
+                      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectEmail(latest.id) }
+                    }}
+                    className={`w-full text-left px-4 py-3.5 border-b border-slate-50 flex items-start gap-2 transition-colors cursor-pointer ${
+                      latest.id === selectedEmailId ? 'bg-indigo-50/70' : 'hover:bg-slate-50'
+                    }`}
+                  >
+                    {/* Chevron — only for threads with multiple messages */}
+                    {hasMultiple ? (
+                      <button
+                        onClick={(e) => toggleThread(thread.conversationId, e)}
+                        className="shrink-0 mt-1.5 text-slate-400 hover:text-slate-600 transition-colors"
+                        aria-label={isExpanded ? 'Collapse thread' : 'Expand thread'}
+                      >
+                        <ChevronRightIcon
+                          className={`w-3.5 h-3.5 transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`}
+                        />
+                      </button>
+                    ) : (
+                      <span className="shrink-0 w-3.5 mt-1.5" />
                     )}
-                    <span className={`text-sm truncate ${email.read ? 'font-medium text-slate-700' : 'font-bold text-slate-900'}`}>
-                      {email.sender}
-                    </span>
-                    <span className="text-xs text-slate-400 ml-auto shrink-0">{email.time}</span>
+
+                    <div className={`w-9 h-9 rounded-full ${latest.avatarColor} flex items-center justify-center text-xs font-bold text-white shrink-0 mt-0.5`}>
+                      {latest.avatar}
+                    </div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        {!latest.read && <span className="w-2 h-2 rounded-full bg-indigo-600 shrink-0" />}
+                        <span className={`text-sm truncate ${latest.read ? 'font-medium text-slate-700' : 'font-bold text-slate-900'}`}>
+                          {latest.sender}
+                        </span>
+                        {hasMultiple && (
+                          <span className="text-xs font-semibold text-slate-500 bg-slate-100 rounded-full px-1.5 py-0.5 shrink-0 leading-none">
+                            {threadCount}
+                          </span>
+                        )}
+                        <span className="text-xs text-slate-400 ml-auto shrink-0">{latest.time}</span>
+                      </div>
+                      <p className={`text-sm truncate mb-0.5 ${latest.read ? 'text-slate-500' : 'font-semibold text-slate-800'}`}>
+                        {latest.subject}
+                      </p>
+                      <p className="text-xs text-slate-400 truncate">{latest.preview}</p>
+                    </div>
+
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onTogglePin(latest.id, e) }}
+                      className={`shrink-0 mt-1 cursor-pointer transition-colors ${latest.pinned ? 'text-indigo-500' : 'text-slate-300 hover:text-indigo-400'}`}
+                      aria-label={latest.pinned ? 'Unpin' : 'Pin'}
+                    >
+                      <PinIcon className="w-4 h-4" filled={latest.pinned} />
+                    </button>
                   </div>
-                  <p className={`text-sm truncate mb-0.5 ${email.read ? 'text-slate-500' : 'font-semibold text-slate-800'}`}>
-                    {email.subject}
-                  </p>
-                  <p className="text-xs text-slate-400 truncate">{email.preview}</p>
+
+                  {/* Expanded messages — immediate fallback to inbox emails, updates to full conversation when loaded */}
+                  {isExpanded && (
+                    <>
+                      {isLoading && !conversationMsgs && (
+                        <div className="pl-10 pr-4 py-2 border-b border-slate-50 border-l-2 border-l-indigo-100 text-xs text-slate-400 italic">
+                          Loading full conversation…
+                        </div>
+                      )}
+                      {isFailed && !isLoading && (
+                        <div className="pl-10 pr-4 py-2 border-b border-slate-50 border-l-2 border-l-red-100 text-xs text-red-400 flex items-center gap-2">
+                          <span>Failed to load full thread.</span>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onLoadConversation?.(thread.conversationId) }}
+                            className="underline font-medium hover:text-red-600 cursor-pointer"
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      )}
+                      {expandedEmails.map((email) => (
+                        <div
+                          key={email.id}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open email from ${email.sender}`}
+                          onClick={() => onSelectEmail(email.id)}
+                          onKeyDown={(e) => {
+                            if (e.target !== e.currentTarget) return
+                            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectEmail(email.id) }
+                          }}
+                          className={`w-full text-left pl-10 pr-4 py-2.5 border-b border-slate-50 flex items-start gap-2.5 transition-colors cursor-pointer border-l-2 border-l-indigo-100 ${
+                            email.id === selectedEmailId ? 'bg-indigo-50/70' : 'bg-slate-50/40 hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className={`w-7 h-7 rounded-full ${email.avatarColor || 'bg-blue-500'} flex items-center justify-center text-xs font-bold text-white shrink-0 mt-0.5`}>
+                            {email.avatar || getAvatarFromSender(email.sender)}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 mb-0.5">
+                              {!email.read && <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0" />}
+                              <span className={`text-sm truncate ${email.read ? 'font-medium text-slate-600' : 'font-bold text-slate-900'}`}>
+                                {email.sender}
+                              </span>
+                              <span className="text-xs text-slate-400 ml-auto shrink-0">{email.time}</span>
+                            </div>
+                            <p className={`text-xs truncate ${email.read ? 'text-slate-500' : 'font-semibold text-slate-700'}`}>{email.subject}</p>
+                            <p className="text-xs text-slate-400 truncate">{email.preview}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
                 </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onToggleStar(email.id, e)
-                  }}
-                  className={`shrink-0 mt-1 cursor-pointer transition-colors ${
-                    email.starred ? 'text-amber-400' : 'text-slate-300 hover:text-amber-400'
-                  }`}
-                  aria-label={email.starred ? 'Unstar' : 'Star'}
-                >
-                  <StarIcon className="w-4 h-4" filled={email.starred} />
-                </button>
+              )
+                })}
               </div>
             ))
           )}
@@ -3209,16 +3693,18 @@ function InboxPage({
                   >
                     <PinIcon className="w-4 h-4" filled={selectedEmail.pinned} />
                   </button>
-                  <button
-                    onClick={() => onToggleStar(selectedEmail.id)}
-                    className={`w-8 h-8 inline-flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
-                      selectedEmail.starred ? 'text-amber-400 bg-amber-50' : 'text-slate-300 hover:text-amber-400 hover:bg-amber-50'
-                    }`}
-                    aria-label={selectedEmail.starred ? 'Unstar' : 'Star'}
-                    title={selectedEmail.starred ? 'Unstar email' : 'Star email'}
-                  >
-                    <StarIcon className="w-5 h-5" filled={selectedEmail.starred} />
-                  </button>
+                  {selectedEmail.provider !== 'outlook' && (
+                    <button
+                      onClick={() => onToggleStar(selectedEmail.id)}
+                      className={`w-8 h-8 inline-flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
+                        selectedEmail.starred ? 'text-amber-400 bg-amber-50' : 'text-slate-300 hover:text-amber-400 hover:bg-amber-50'
+                      }`}
+                      aria-label={selectedEmail.starred ? 'Unstar' : 'Star'}
+                      title={selectedEmail.starred ? 'Unstar email' : 'Star email'}
+                    >
+                      <StarIcon className="w-5 h-5" filled={selectedEmail.starred} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -3408,13 +3894,33 @@ function DraftsPage({ drafts, onDeleteRequest, onEditRequest }) {
   )
 }
 
-function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEmails, outlookEmails }) {
+function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEmails, outlookEmails, activeProvider, outlookConversationMessages, loadingConversationIds, onLoadConversation }) {
+  const [expandedSentThreadIds, setExpandedSentThreadIds] = useState(new Set())
   const selectedSentEmail = sentEmails.find((email) => email.id === selectedSentEmailId) || sentEmails[0]
   const allProviderEmails = [...gmailEmails, ...outlookEmails]
   const relatedEmailId = selectedSentEmail ? (selectedSentEmail.replyToId || selectedSentEmail.threadRootId) : null
   const repliedToEmail = relatedEmailId
     ? allProviderEmails.find((email) => String(email.id) === String(relatedEmailId))
     : null
+
+  const outlookSentThreads = activeProvider === 'outlook' ? groupOutlookEmailsByThread(sentEmails) : []
+
+  function toggleSentThread(conversationId, e) {
+    e.stopPropagation()
+    const isCurrentlyExpanded = expandedSentThreadIds.has(conversationId)
+    if (!isCurrentlyExpanded && !outlookConversationMessages?.has(conversationId) && !loadingConversationIds?.has(conversationId)) {
+      onLoadConversation?.(conversationId)
+    }
+    setExpandedSentThreadIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(conversationId)) {
+        next.delete(conversationId)
+      } else {
+        next.add(conversationId)
+      }
+      return next
+    })
+  }
 
   return (
     <div className="h-full bg-white flex">
@@ -3434,6 +3940,86 @@ function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEma
               <SentIcon className="w-10 h-10 mx-auto mb-3" />
               <p className="text-sm font-medium">No sent emails yet</p>
             </div>
+          ) : activeProvider === 'outlook' ? (
+            outlookSentThreads.map((thread) => {
+              const isExpanded = expandedSentThreadIds.has(thread.conversationId)
+              const isLoading = loadingConversationIds?.has(thread.conversationId)
+              const conversationMsgs = outlookConversationMessages?.get(thread.conversationId)
+              const expandedEmails = (conversationMsgs?.length > 0) ? conversationMsgs : thread.emails
+              const threadCount = (conversationMsgs?.length > 0) ? conversationMsgs.length : thread.count
+              const hasMultiple = thread.count > 1
+              const latest = thread.latest
+              return (
+                <div key={thread.conversationId}>
+                  <div
+                    className={`flex items-start gap-2 px-3.5 py-2.5 border-b border-slate-100 transition-colors cursor-pointer ${
+                      selectedSentEmail && selectedSentEmail.id === latest.id ? 'bg-indigo-50/70' : 'hover:bg-slate-50'
+                    }`}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => onSelectSentEmail(latest.id)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSentEmail(latest.id) } }}
+                  >
+                    {hasMultiple ? (
+                      <button
+                        onClick={(e) => toggleSentThread(thread.conversationId, e)}
+                        className="shrink-0 mt-1 text-slate-400 hover:text-slate-600 transition-colors"
+                        aria-label={isExpanded ? 'Collapse thread' : 'Expand thread'}
+                      >
+                        <ChevronRightIcon className={`w-3.5 h-3.5 transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`} />
+                      </button>
+                    ) : (
+                      <span className="shrink-0 w-3.5 mt-1" />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between mb-1">
+                        <p className="text-sm font-semibold text-slate-900 truncate">To: {latest.to}</p>
+                        <div className="flex items-center gap-1.5 shrink-0 ml-3">
+                          {hasMultiple && (
+                            <span className="text-xs font-semibold text-slate-500 bg-slate-100 rounded-full px-1.5 py-0.5 leading-none">
+                              {threadCount}
+                            </span>
+                          )}
+                          <span className="text-xs text-slate-400">{latest.time}</span>
+                        </div>
+                      </div>
+                      <p className="text-sm font-medium text-slate-700 truncate">{latest.subject}</p>
+                      <p className="text-xs text-slate-500 truncate">{latest.body}</p>
+                    </div>
+                  </div>
+                  {isExpanded && (
+                    <>
+                      {isLoading && !conversationMsgs && (
+                        <div className="pl-8 pr-4 py-2 border-b border-slate-100 border-l-2 border-l-indigo-100 text-xs text-slate-400 italic">
+                          Loading full conversation…
+                        </div>
+                      )}
+                      {expandedEmails.map((email) => (
+                        <div
+                          key={email.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => onSelectSentEmail(email.id)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSentEmail(email.id) } }}
+                          className={`flex items-start gap-2.5 pl-8 pr-4 py-2.5 border-b border-slate-100 border-l-2 border-l-indigo-100 cursor-pointer transition-colors ${
+                            selectedSentEmail && selectedSentEmail.id === email.id ? 'bg-indigo-50/70' : 'bg-slate-50/40 hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-sm font-medium text-slate-700 truncate">{email.sender || `To: ${email.to}`}</span>
+                              <span className="text-xs text-slate-400 shrink-0 ml-2">{email.time}</span>
+                            </div>
+                            {email.subject && <p className="text-xs font-medium text-slate-600 truncate">{email.subject}</p>}
+                            <p className="text-xs text-slate-400 truncate">{email.preview || email.body}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )
+            })
           ) : (
             sentEmails.map((email) => (
               <button

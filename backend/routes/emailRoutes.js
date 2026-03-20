@@ -675,8 +675,8 @@ async function tryRefreshMicrosoftToken(userId, refreshToken) {
   }
 }
 
-async function fetchGraphJson(url, token) {
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+async function fetchGraphJson(url, token, extraHeaders = {}) {
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}`, ...extraHeaders } })
   if (!response.ok) {
     const errorText = await response.text()
     const error = new Error(`Microsoft Graph API request failed with status ${response.status}.`)
@@ -701,6 +701,8 @@ function normalizeOutlookMessage(msg) {
     date: receivedDate,
     internalDate: receivedDate ? new Date(receivedDate).getTime() : null,
     isRead: Boolean(msg.isRead),
+    conversationId: msg.conversationId || msg.id,
+    flagged: msg.flag?.flagStatus === 'flagged',
   }
 }
 
@@ -718,7 +720,7 @@ router.get('/outlook', async (req, res, next) => {
     const skipToken = typeof req.query.skipToken === 'string' ? req.query.skipToken : ''
     const params = new URLSearchParams({
       '$top': String(maxResults),
-      '$select': 'id,subject,from,receivedDateTime,bodyPreview,isRead',
+      '$select': 'id,subject,from,receivedDateTime,bodyPreview,isRead,conversationId,flag',
       '$orderby': 'receivedDateTime desc',
     })
     if (skipToken) params.set('$skipToken', skipToken)
@@ -756,6 +758,510 @@ router.get('/outlook', async (req, res, next) => {
     if (error.graphError) {
       console.error('GRAPH API ERROR (inbox):', error.graphError)
       return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook messages.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.get('/outlook/sent', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  let { accessToken, refreshToken } = tokens
+
+  try {
+    const url = 'https://graph.microsoft.com/v1.0/me/mailFolders/SentItems/messages?$top=25&$select=id,subject,toRecipients,sentDateTime,bodyPreview,conversationId&$orderby=sentDateTime%20desc'
+
+    let data
+    try {
+      data = await fetchGraphJson(url, accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          data = await fetchGraphJson(url, freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+
+    const messages = Array.isArray(data.value) ? data.value : []
+    return res.status(200).json({
+      emails: messages.map((msg) => {
+        const recipients = Array.isArray(msg.toRecipients)
+          ? msg.toRecipients.map((r) => r.emailAddress?.address || '').filter(Boolean).join(', ')
+          : ''
+        return {
+          id: msg.id,
+          to: recipients,
+          subject: msg.subject || '(No Subject)',
+          snippet: msg.bodyPreview || '',
+          date: msg.sentDateTime || null,
+          internalDate: msg.sentDateTime ? new Date(msg.sentDateTime).getTime() : null,
+          conversationId: msg.conversationId || msg.id,
+        }
+      }),
+    })
+  } catch (error) {
+    if (error.graphError) {
+      console.error('GRAPH API ERROR (sent):', error.graphError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook sent emails.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.get('/outlook/drafts', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  let { accessToken, refreshToken } = tokens
+
+  try {
+    const url = 'https://graph.microsoft.com/v1.0/me/mailFolders/Drafts/messages?$top=25&$select=id,subject,toRecipients,lastModifiedDateTime,bodyPreview&$orderby=lastModifiedDateTime%20desc'
+
+    let data
+    try {
+      data = await fetchGraphJson(url, accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          data = await fetchGraphJson(url, freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+
+    const messages = Array.isArray(data.value) ? data.value : []
+    return res.status(200).json({
+      drafts: messages.map((msg) => {
+        const recipients = Array.isArray(msg.toRecipients)
+          ? msg.toRecipients.map((r) => r.emailAddress?.address || '').filter(Boolean).join(', ')
+          : ''
+        return {
+          id: msg.id,
+          to: recipients,
+          subject: msg.subject || '(No Subject)',
+          snippet: msg.bodyPreview || '',
+          date: msg.lastModifiedDateTime || null,
+          internalDate: msg.lastModifiedDateTime ? new Date(msg.lastModifiedDateTime).getTime() : null,
+        }
+      }),
+    })
+  } catch (error) {
+    if (error.graphError) {
+      console.error('GRAPH API ERROR (drafts):', error.graphError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook drafts.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.post('/outlook/send', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  const to = String(req.body?.to || '').trim()
+  const subject = String(req.body?.subject || '').trim()
+  const body = String(req.body?.body || '').trim()
+
+  if (!to || !body) {
+    return res.status(400).json({ message: 'Missing required fields: to, body.' })
+  }
+
+  let { accessToken, refreshToken } = tokens
+
+  async function doSend(token) {
+    const response = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: {
+          subject: subject || '(No Subject)',
+          body: { contentType: 'Text', content: body },
+          toRecipients: [{ emailAddress: { address: to } }],
+        },
+        saveToSentItems: true,
+      }),
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const err = new Error(`Graph sendMail failed: ${response.status}`)
+      err.statusCode = response.status
+      err.graphError = errorText
+      throw err
+    }
+  }
+
+  try {
+    try {
+      await doSend(accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          await doSend(freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+    return res.status(200).json({ success: true })
+  } catch (error) {
+    if (error.graphError) {
+      return res.status(error.statusCode || 500).json({ message: 'Failed to send Outlook email.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.post('/outlook/drafts', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  const to = String(req.body?.to || '').trim()
+  const subject = String(req.body?.subject || '').trim()
+  const body = String(req.body?.body || '').trim()
+
+  let { accessToken, refreshToken } = tokens
+
+  async function createDraft(token) {
+    const response = await fetch('https://graph.microsoft.com/v1.0/me/messages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subject: subject || '(No Subject)',
+        body: { contentType: 'Text', content: body },
+        toRecipients: to ? [{ emailAddress: { address: to } }] : [],
+      }),
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const err = new Error(`Graph POST draft failed: ${response.status}`)
+      err.statusCode = response.status
+      err.graphError = errorText
+      throw err
+    }
+    return response.json()
+  }
+
+  try {
+    let data
+    try {
+      data = await createDraft(accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          data = await createDraft(freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+    return res.status(200).json({ success: true, id: data.id })
+  } catch (error) {
+    if (error.graphError) {
+      return res.status(error.statusCode || 500).json({ message: 'Failed to create Outlook draft.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.put('/outlook/drafts/:id', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  const to = String(req.body?.to || '').trim()
+  const subject = String(req.body?.subject || '').trim()
+  const body = String(req.body?.body || '').trim()
+
+  let { accessToken, refreshToken } = tokens
+
+  async function updateDraft(token) {
+    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subject: subject || '(No Subject)',
+        body: { contentType: 'Text', content: body },
+        toRecipients: to ? [{ emailAddress: { address: to } }] : [],
+      }),
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const err = new Error(`Graph PATCH draft failed: ${response.status}`)
+      err.statusCode = response.status
+      err.graphError = errorText
+      throw err
+    }
+    return response.json()
+  }
+
+  try {
+    let data
+    try {
+      data = await updateDraft(accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          data = await updateDraft(freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+    return res.status(200).json({ success: true, id: data.id })
+  } catch (error) {
+    if (error.graphError) {
+      return res.status(error.statusCode || 500).json({ message: 'Failed to update Outlook draft.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.post('/outlook/drafts/:id/send', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  let { accessToken, refreshToken } = tokens
+
+  async function sendDraft(token) {
+    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${req.params.id}/send`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Length': '0' },
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const err = new Error(`Graph send draft failed: ${response.status}`)
+      err.statusCode = response.status
+      err.graphError = errorText
+      throw err
+    }
+  }
+
+  try {
+    try {
+      await sendDraft(accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          await sendDraft(freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+    return res.status(200).json({ success: true })
+  } catch (error) {
+    if (error.graphError) {
+      return res.status(error.statusCode || 500).json({ message: 'Failed to send Outlook draft.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.delete('/outlook/drafts/:id', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  let { accessToken, refreshToken } = tokens
+
+  async function deleteDraft(token) {
+    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const err = new Error(`Graph DELETE draft failed: ${response.status}`)
+      err.statusCode = response.status
+      err.graphError = errorText
+      throw err
+    }
+  }
+
+  try {
+    try {
+      await deleteDraft(accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          await deleteDraft(freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+    return res.status(200).json({ success: true })
+  } catch (error) {
+    if (error.graphError) {
+      return res.status(error.statusCode || 500).json({ message: 'Failed to delete Outlook draft.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.get('/outlook/conversation/:conversationId', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  let { accessToken, refreshToken } = tokens
+  const { conversationId } = req.params
+
+  // Refresh token once if needed, then use for all requests
+  async function getValidToken() {
+    try {
+      await fetchGraphJson('https://graph.microsoft.com/v1.0/me?$select=id', accessToken)
+      return accessToken
+    } catch (err) {
+      if (err.statusCode === 401 && refreshToken) {
+        const fresh = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (fresh) { accessToken = fresh; return fresh }
+      }
+      throw err
+    }
+  }
+
+  try {
+    const token = await getValidToken()
+    const filterValue = encodeURIComponent(`conversationId eq '${conversationId}'`)
+    const select = 'id,subject,from,receivedDateTime,bodyPreview,isRead,conversationId,flag'
+    // No $orderby — combining $filter + $orderby can cause Graph API to reject the request;
+    // we sort manually after merging. $count=true is required when using $filter on messages.
+    const queryString = `$filter=${filterValue}&$top=100&$select=${select}&$count=true`
+
+    // ConsistencyLevel + $count are required for $filter on message collections
+    const filterHeaders = { ConsistencyLevel: 'eventual' }
+
+    // Fetch inbox + sent in parallel — folder-specific endpoints support $filter reliably
+    const [inboxResult, sentResult] = await Promise.allSettled([
+      fetchGraphJson(`https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?${queryString}`, token, filterHeaders),
+      fetchGraphJson(`https://graph.microsoft.com/v1.0/me/mailFolders/SentItems/messages?${queryString}`, token, filterHeaders),
+    ])
+
+    if (inboxResult.status === 'rejected') console.error('INBOX FILTER ERROR:', inboxResult.reason?.graphError || inboxResult.reason)
+    if (sentResult.status === 'rejected') console.error('SENT FILTER ERROR:', sentResult.reason?.graphError || sentResult.reason)
+
+    const inboxMsgs = inboxResult.status === 'fulfilled' ? (inboxResult.value?.value ?? []) : []
+    const sentMsgs = sentResult.status === 'fulfilled' ? (sentResult.value?.value ?? []) : []
+
+    if (inboxResult.status === 'rejected' && sentResult.status === 'rejected') {
+      return res.status(500).json({ message: 'Failed to fetch conversation from any folder.' })
+    }
+
+    // Merge, deduplicate by id, sort ascending by receivedDateTime
+    const seenIds = new Set()
+    const combined = []
+    for (const msg of [...inboxMsgs, ...sentMsgs]) {
+      if (!seenIds.has(msg.id)) {
+        seenIds.add(msg.id)
+        combined.push(msg)
+      }
+    }
+    combined.sort((a, b) => new Date(a.receivedDateTime || 0) - new Date(b.receivedDateTime || 0))
+
+    return res.status(200).json({ messages: combined.map(normalizeOutlookMessage) })
+  } catch (error) {
+    if (error.graphError) {
+      console.error('GRAPH API ERROR (conversation):', error.graphError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch conversation.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.patch('/outlook/:id/flag', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+
+  let { accessToken, refreshToken } = tokens
+  const { id } = req.params
+  const flagged = Boolean(req.body.flagged)
+  const body = JSON.stringify({ flag: { flagStatus: flagged ? 'flagged' : 'notFlagged' } })
+
+  async function patchFlag(token) {
+    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body,
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const error = new Error(`Microsoft Graph API request failed with status ${response.status}.`)
+      error.statusCode = response.status
+      error.graphError = errorText
+      throw error
+    }
+  }
+
+  try {
+    try {
+      await patchFlag(accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          await patchFlag(freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+    return res.status(200).json({ flagged })
+  } catch (error) {
+    if (error.graphError) {
+      console.error('GRAPH API ERROR (flag):', error.graphError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to update flag.', graph_error: error.graphError })
     }
     return next(error)
   }
