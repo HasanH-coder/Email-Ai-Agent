@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { startGoogleConnect, startMicrosoftConnect } from './services/connect'
+import { startGoogleConnect, startMicrosoftConnect, connectOutlookViaBackend, connectGmailViaBackend } from './services/connect'
 import { getSupabase } from './services/supabaseClient'
 
 
@@ -986,12 +986,24 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
     if (onSendEmail) {
       try {
         setIsSending(true)
+        const encodedAttachments = await Promise.all(
+          attachments.map(
+            (a) =>
+              new Promise((resolve, reject) => {
+                const reader = new FileReader()
+                reader.onload = () => resolve({ name: a.name, mimeType: a.mimeType, data: reader.result.split(',')[1] })
+                reader.onerror = reject
+                reader.readAsDataURL(a.file)
+              })
+          )
+        )
         await onSendEmail({
           to,
           cc,
           subject,
           body,
           draftId: isEditing ? initialData?.id : null,
+          attachments: encodedAttachments,
         })
       } catch (error) {
         setComposeMessage(error?.message || 'Failed to send email.')
@@ -1545,14 +1557,6 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }, [outlookEmailState])
 
   const getGoogleProviderToken = useCallback(async () => {
-    const supabase = getSupabase()
-    if (!supabase) return null
-
-    const { data } = await supabase.auth.getSession()
-    return data?.session?.provider_token || null
-  }, [])
-
-  const getSupabaseAccessToken = useCallback(async () => {
     const supabase = getSupabase()
     if (!supabase) return null
     const { data } = await supabase.auth.getSession()
@@ -2557,9 +2561,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
 
     setActiveProvider(provider)
-    if (providerEmails.length > 0) {
-      setSelectedEmailId(providerEmails[0].id)
-    }
+    setSelectedEmailId(null)
     setActiveFilter('all')
     setMobileShowDetail(false)
   }
@@ -2607,17 +2609,12 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }
 
   function handleConnect(provider, email) {
-    const other = provider === 'gmail' ? 'outlook' : 'gmail'
-    writeProviderTokenStatus(other, false)
     writeProviderTokenStatus(provider, true)
-    setConnectedAccounts({ [provider]: true, [other]: false })
-    setConnectedEmails((prev) => ({ ...prev, [provider]: email, [other]: '' }))
+    setConnectedAccounts((prev) => ({ ...prev, [provider]: true }))
+    setConnectedEmails((prev) => ({ ...prev, [provider]: email }))
     if (connectModal.fromInbox) {
       setActiveProvider(provider)
-      const providerEmails = provider === 'gmail' ? gmailEmailState : outlookEmailState
-      if (providerEmails.length > 0) {
-        setSelectedEmailId(providerEmails[0].id)
-      }
+      setSelectedEmailId(null)
       setActiveFilter('all')
       setMobileShowDetail(false)
     }
@@ -2627,14 +2624,24 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   async function handleConnectStart(provider) {
     setConnectActionError('')
     try {
+      const supabase = getSupabase()
+      const { data } = supabase ? await supabase.auth.getSession() : { data: {} }
+      const supabaseToken = data?.session?.access_token
+
       if (provider === 'gmail') {
-        window.localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'gmail')
-        console.log('Setting oauth_provider_hint before Gmail connect click handler:', 'gmail')
-        await startGoogleConnect()
+        if (supabaseToken) {
+          await connectGmailViaBackend(supabaseToken)
+        } else {
+          window.localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'gmail')
+          await startGoogleConnect()
+        }
       } else {
-        window.localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
-        console.log('Setting oauth_provider_hint before Outlook connect click handler:', 'outlook')
-        await startMicrosoftConnect(true)
+        if (supabaseToken) {
+          await connectOutlookViaBackend(supabaseToken)
+        } else {
+          window.localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
+          await startMicrosoftConnect(true)
+        }
       }
     } catch (error) {
       setConnectActionError(error?.message || 'Could not start account connection.')
@@ -2649,8 +2656,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       const other = provider === 'gmail' ? 'outlook' : 'gmail'
       if (connectedAccounts[other]) {
         setActiveProvider(other)
-        const otherEmails = other === 'gmail' ? gmailEmailState : outlookEmailState
-        if (otherEmails.length > 0) setSelectedEmailId(otherEmails[0].id)
+        setSelectedEmailId(null)
       }
     }
   }
@@ -2866,7 +2872,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
     let emailText = ''
     try {
-      const token = await getSupabaseAccessToken()
+      const token = await getMicrosoftSupabaseToken()
       const response = await fetch('http://localhost:5001/api/ai/generate-email', {
         method: 'POST',
         headers: {
@@ -3017,7 +3023,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       }
 
       try {
-        const token = await getSupabaseAccessToken()
+        const token = await getMicrosoftSupabaseToken()
         const response = await fetch('http://localhost:5001/api/ai/generate-email', {
           method: 'POST',
           headers: {
@@ -3281,7 +3287,10 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           )}
           {activePage === 'drafts' && (
             <DraftsPage
-              drafts={currentDrafts}
+              gmailDrafts={gmailDrafts}
+              outlookDrafts={outlookDrafts}
+              connectedAccounts={connectedAccounts}
+              defaultProvider={activeProvider}
               onDeleteRequest={(id) => setDeletingDraftId(id)}
               onEditRequest={(draft) => {
                 setEditingDraft(draft)
@@ -4137,10 +4146,13 @@ function InboxPage({
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-slate-400">
-            <div className="text-center">
-              <InboxIcon className="w-12 h-12 mx-auto mb-3" />
-              <p className="text-sm font-medium">Select an email to read</p>
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center px-8">
+              <div className="w-20 h-20 mx-auto mb-5 rounded-2xl bg-slate-100 flex items-center justify-center">
+                <InboxIcon className="w-10 h-10 text-slate-400" />
+              </div>
+              <p className="text-base font-semibold text-slate-700 mb-1">No email selected</p>
+              <p className="text-sm text-slate-400">Click on an email from the list to read it here</p>
             </div>
           </div>
         )}
@@ -4151,7 +4163,14 @@ function InboxPage({
 
 
 // --- Drafts Page ---
-function DraftsPage({ drafts, onDeleteRequest, onEditRequest }) {
+function DraftsPage({ gmailDrafts, outlookDrafts, connectedAccounts, defaultProvider, onDeleteRequest, onEditRequest }) {
+  const [draftsProvider, setDraftsProvider] = useState(() => {
+    if (defaultProvider === 'outlook' && (outlookDrafts?.length > 0 || connectedAccounts?.outlook)) return 'outlook'
+    return 'gmail'
+  })
+  const showToggle = connectedAccounts?.gmail && connectedAccounts?.outlook
+  const drafts = draftsProvider === 'gmail' ? (gmailDrafts || []) : (outlookDrafts || [])
+
   return (
     <div className="h-full overflow-y-auto bg-white">
       <div className="max-w-3xl mx-auto px-6 py-8">
@@ -4162,6 +4181,29 @@ function DraftsPage({ drafts, onDeleteRequest, onEditRequest }) {
             {drafts.length}
           </span>
         </div>
+
+        {showToggle && (
+          <div className="flex items-center gap-2 mb-6">
+            <button
+              onClick={() => setDraftsProvider('gmail')}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${draftsProvider === 'gmail' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+            >
+              <svg className="w-4 h-4 text-red-500 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" />
+              </svg>
+              Gmail
+            </button>
+            <button
+              onClick={() => setDraftsProvider('outlook')}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${draftsProvider === 'outlook' ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+            >
+              <svg className="w-4 h-4 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M24 7.387v10.478c0 .23-.08.427-.24.59a.802.802 0 01-.59.239h-1.54V9.5l-9.63 6.131L2.37 9.5v9.194H.83a.802.802 0 01-.59-.24A.804.804 0 010 17.865V7.387c0-.332.12-.613.36-.843.24-.23.52-.344.84-.344h.1l10.33 6.573 10.33-6.573h.1c.32 0 .6.115.84.344.24.23.36.511.36.843z" />
+              </svg>
+              Outlook
+            </button>
+          </div>
+        )}
 
         {drafts.length === 0 ? (
           <div className="text-center py-16 text-slate-400">
@@ -4271,13 +4313,15 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onS
                 onClick={() => setSentProvider('gmail')}
                 className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'gmail' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
               >
-                <span className="text-[10px]">M</span> Gmail
+                <svg className="w-4 h-4 text-red-500 shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" /></svg>
+                Gmail
               </button>
               <button
                 onClick={() => setSentProvider('outlook')}
                 className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'outlook' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
               >
-                <span className="text-[10px]">⊞</span> Outlook
+                <svg className="w-4 h-4 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M24 7.387v10.478c0 .23-.08.424-.238.576-.16.154-.352.23-.578.23h-8.26v-6.08L16.91 14l1.957-1.41v-2.534l-1.957 1.38L12.924 8.6V7.157h10.26c.226 0 .418.08.578.233.158.152.238.35.238.576v-.58zM14.078 5.07v14.64L0 17.488V3.293l14.078 1.778zm-2.89 4.252c-.533-.754-1.268-1.13-2.206-1.13-.918 0-1.654.386-2.2 1.16-.55.773-.822 1.772-.822 2.997 0 1.174.264 2.127.793 2.86.53.734 1.248 1.1 2.157 1.1.963 0 1.72-.37 2.27-1.113.55-.743.823-1.733.823-2.97 0-1.28-.272-2.284-.816-3.018v.114zm-1.16 5.057c-.267.477-.648.716-1.143.716-.486 0-.87-.245-1.15-.735-.28-.49-.42-1.14-.42-1.948 0-.84.14-1.506.42-1.998.282-.49.67-.737 1.168-.737.483 0 .863.24 1.142.72.278.48.418 1.142.418 1.985 0 .844-.145 1.52-.435 1.997z" /></svg>
+                Outlook
               </button>
             </div>
           )}

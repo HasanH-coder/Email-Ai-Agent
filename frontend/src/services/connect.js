@@ -3,11 +3,13 @@ import { getSupabase } from './supabaseClient'
 const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
 const CONNECTING_PROVIDER_STARTED_AT_KEY = 'connecting_provider_started_at'
 const OAUTH_CALLBACK_PATH = '/auth/callback'
+const BACKEND_URL = 'http://localhost:5001'
 
 function getOAuthRedirectUrl() {
   return `${window.location.origin}${OAUTH_CALLBACK_PATH}`
 }
 
+// Used for initial login (no existing session) — creates a new Supabase user
 export async function startGoogleConnect() {
   const supabase = getSupabase()
   if (!supabase) {
@@ -27,10 +29,7 @@ export async function startGoogleConnect() {
     options: {
       redirectTo: getOAuthRedirectUrl(),
       scopes: 'openid email profile https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.compose',
-      queryParams: {
-        access_type: 'offline',
-        prompt: 'consent',
-      },
+      queryParams: { access_type: 'offline', prompt: 'consent' },
     },
   })
 
@@ -39,6 +38,7 @@ export async function startGoogleConnect() {
   }
 }
 
+// Used for initial login (no existing session) — creates a new Supabase user
 export async function startMicrosoftConnect(userInitiated = false) {
   const supabase = getSupabase()
   if (!supabase) {
@@ -61,22 +61,41 @@ export async function startMicrosoftConnect(userInitiated = false) {
     options: {
       redirectTo: getOAuthRedirectUrl(),
       scopes: [
-        'openid',
-        'profile',
-        'email',
-        'offline_access',
+        'openid', 'profile', 'email', 'offline_access',
         'https://graph.microsoft.com/User.Read',
         'https://graph.microsoft.com/Mail.Read',
         'https://graph.microsoft.com/Mail.ReadWrite',
         'https://graph.microsoft.com/Mail.Send',
       ].join(' '),
-      queryParams: {
-        prompt: 'consent',
-      },
+      queryParams: { prompt: 'consent' },
     },
   })
 
   if (error) {
     throw new Error(error.message || 'Failed to start Microsoft OAuth.')
   }
+}
+
+// Used when already logged in — routes OAuth through the backend so the
+// Supabase session never switches and tokens are stored under the existing user_id.
+export async function connectOutlookViaBackend(supabaseToken) {
+  const resp = await fetch(`${BACKEND_URL}/api/auth/microsoft/authorize`, {
+    headers: { Authorization: `Bearer ${supabaseToken}` },
+  })
+  if (!resp.ok) {
+    throw new Error('Failed to get Microsoft authorization URL.')
+  }
+  const { url } = await resp.json()
+  window.location.href = url
+}
+
+export async function connectGmailViaBackend(supabaseToken) {
+  const resp = await fetch(`${BACKEND_URL}/api/auth/google/authorize`, {
+    headers: { Authorization: `Bearer ${supabaseToken}` },
+  })
+  if (!resp.ok) {
+    throw new Error('Failed to get Google authorization URL.')
+  }
+  const { url } = await resp.json()
+  window.location.href = url
 }

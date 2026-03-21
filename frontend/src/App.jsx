@@ -133,33 +133,6 @@ export default function App() {
       })
       .filter(Boolean)
 
-    // Enforce only one provider can be connected at a time.
-    // If both exist in the DB, determine which to keep:
-    // 1. Use the providerHint from localStorage (set during OAuth flow)
-    // 2. Otherwise use the current Supabase session's OAuth provider
-    const hasGmail = normalizedRows.some((r) => r.provider === 'gmail')
-    const hasOutlook = normalizedRows.some((r) => r.provider === 'outlook')
-
-    if (hasGmail && hasOutlook) {
-      let keepProvider = null
-      const hint = localStorage.getItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
-      if (hint === 'gmail' || hint === 'outlook') {
-        keepProvider = hint
-      } else {
-        const { data: sessionData } = await supabase.auth.getSession()
-        const sessionProvider = sessionData?.session?.user?.app_metadata?.provider
-        keepProvider = normalizeConnectedProvider(sessionProvider) || 'gmail'
-      }
-      const dropProvider = keepProvider === 'gmail' ? 'outlook' : 'gmail'
-      await supabase
-        .from('connected_accounts')
-        .delete()
-        .eq('user_id', userId)
-        .eq('provider', dropProvider)
-      setConnectedAccountRows(normalizedRows.filter((r) => r.provider !== dropProvider))
-      return
-    }
-
     setConnectedAccountRows(normalizedRows)
   }
 
@@ -304,7 +277,7 @@ export default function App() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_IN') {
+      if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
         sessionStorage.setItem('mailpilot.session_active', 'true')
         setAuthSession(session ?? null)
         if (session?.access_token) {
@@ -407,11 +380,10 @@ export default function App() {
         return
       }
       const accountEmail = getBestIdentityEmail(user, providerHint)
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
-      const accessToken = session?.provider_token
-      const refreshToken = session?.provider_refresh_token
+      // Use authSession directly — it has the correct provider_token from the OAuth callback.
+      // Calling getSession() again can return a stale or different provider's token.
+      const accessToken = authSession?.provider_token
+      const refreshToken = authSession?.provider_refresh_token
 
       console.log('Connected account upsert payload:', {
         userId: user.id,
@@ -441,13 +413,12 @@ export default function App() {
         return
       }
 
-      // Disconnect the other provider so only one is active at a time
-      const otherProvider = providerHint === 'gmail' ? 'outlook' : 'gmail'
-      await supabase
-        .from('connected_accounts')
-        .delete()
-        .eq('user_id', user.id)
-        .eq('provider', otherProvider)
+      // Persist Gmail token to localStorage so it survives Supabase session switches
+      // (when Outlook is connected later, the Supabase session changes to Microsoft,
+      // losing the Google provider_token from the session object)
+      if (providerHint === 'gmail' && accessToken) {
+        localStorage.setItem('mailpilot.gmail_access_token', accessToken)
+      }
 
       await refreshConnectedAccountRows(supabase, user.id)
       } finally {
@@ -492,6 +463,60 @@ export default function App() {
     }
     // Don't auto-redirect from the landing page — let users click through manually
   }, [authReady, authSession?.access_token])
+
+  // After backend OAuth (Google callback redirects here with ?connected=gmail).
+  // Also handles Microsoft code exchange (?code=...&state=...) since Azure is
+  // configured to redirect back to the frontend dashboard URL.
+  useEffect(() => {
+    if (!authSession?.access_token) return
+    const params = new URLSearchParams(window.location.search)
+
+    const connected = params.get('connected')
+    const code = params.get('code')
+    const state = params.get('state')
+
+    // Strip all OAuth params from URL immediately
+    if (connected || code) {
+      window.history.replaceState({}, '', '/dashboard')
+    }
+
+    if (connected) {
+      // Google OAuth backend callback already stored the token — just refresh rows
+      const supabase = getSupabase()
+      if (supabase) refreshConnectedAccountRows(supabase, authSession.user?.id)
+      return
+    }
+
+    if (code && state) {
+      // Microsoft redirected here with a code — exchange it via backend
+      let provider = 'outlook'
+      try {
+        const decoded = JSON.parse(atob(state))
+        provider = decoded.provider || 'outlook'
+      } catch { /* ignore */ }
+
+      if (provider === 'outlook') {
+        fetch('http://localhost:5001/api/auth/microsoft/exchange', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authSession.access_token}`,
+          },
+          body: JSON.stringify({ code }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.ok) {
+              const supabase = getSupabase()
+              if (supabase) refreshConnectedAccountRows(supabase, authSession.user?.id)
+            } else {
+              console.error('Microsoft exchange failed:', data.message)
+            }
+          })
+          .catch((err) => console.error('Microsoft exchange error:', err))
+      }
+    }
+  }, [authSession?.access_token])
 
   async function handleDevLogin() {
     if (!authEmail.trim()) {

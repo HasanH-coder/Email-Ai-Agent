@@ -246,27 +246,31 @@ function buildRawEmail({ from, to, subject, body, attachments = [] }) {
 }
 
 router.get('/gmail', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
   try {
     const maxResults = Math.min(Number(req.query.maxResults) || 25, 100)
     const pageToken = typeof req.query.pageToken === 'string' ? req.query.pageToken : ''
     const params = new URLSearchParams({ maxResults: String(maxResults), labelIds: 'INBOX' })
+    if (pageToken) params.set('pageToken', pageToken)
 
-    if (pageToken) {
-      params.set('pageToken', pageToken)
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?${params.toString()}`
+    let listData
+    try {
+      listData = await fetchGmailJson(url, accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { accessToken = freshToken; listData = await fetchGmailJson(url, freshToken) }
+        else throw gmailError
+      } else throw gmailError
     }
-
-    const listData = await fetchGmailJson(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages?${params.toString()}`,
-      token
-    )
     const messages = Array.isArray(listData.messages) ? listData.messages : []
-    const emailItems = await fetchGmailMessagesByIds(messages.map(({ id }) => id), token)
+    const emailItems = await fetchGmailMessagesByIds(messages.map(({ id }) => id), accessToken)
 
     return res.status(200).json({
       emails: emailItems,
@@ -275,97 +279,104 @@ router.get('/gmail', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({
-        message: 'Failed to fetch Gmail messages.',
-        gmail_error: error.gmailError,
-      })
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail messages.', gmail_error: error.gmailError })
     }
-
     return next(error)
   }
 })
 
 router.get('/gmail/inbox-meta', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
   try {
-    await fetchGmailJson('https://gmail.googleapis.com/gmail/v1/users/me/labels', token)
-    const unreadData = await fetchGmailJson(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&q=is:unread&maxResults=1',
-      token
-    )
-
-    return res.status(200).json({
-      unreadInboxCount: Number(unreadData.resultSizeEstimate) || 0,
-    })
+    const unreadUrl = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&q=is:unread&maxResults=1'
+    let unreadData
+    try {
+      await fetchGmailJson('https://gmail.googleapis.com/gmail/v1/users/me/labels', accessToken)
+      unreadData = await fetchGmailJson(unreadUrl, accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) {
+          accessToken = freshToken
+          await fetchGmailJson('https://gmail.googleapis.com/gmail/v1/users/me/labels', accessToken)
+          unreadData = await fetchGmailJson(unreadUrl, accessToken)
+        } else throw gmailError
+      } else throw gmailError
+    }
+    return res.status(200).json({ unreadInboxCount: Number(unreadData.resultSizeEstimate) || 0 })
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({
-        message: 'Failed to fetch Gmail inbox metadata.',
-        gmail_error: error.gmailError,
-      })
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail inbox metadata.', gmail_error: error.gmailError })
     }
-
     return next(error)
   }
 })
 
 router.get('/gmail/sent', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
   try {
-    const listData = await fetchGmailJson(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=SENT&maxResults=50',
-      token
-    )
+    const url = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=SENT&maxResults=50'
+    let listData
+    try {
+      listData = await fetchGmailJson(url, accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { accessToken = freshToken; listData = await fetchGmailJson(url, freshToken) }
+        else throw gmailError
+      } else throw gmailError
+    }
     const messages = Array.isArray(listData.messages) ? listData.messages : []
-    const emailItems = await fetchGmailMessagesByIds(messages.map(({ id }) => id), token)
-
+    const emailItems = await fetchGmailMessagesByIds(messages.map(({ id }) => id), accessToken)
     return res.status(200).json({ emails: emailItems })
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({
-        message: 'Failed to fetch Gmail sent emails.',
-        gmail_error: error.gmailError,
-      })
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail sent emails.', gmail_error: error.gmailError })
     }
-
     return next(error)
   }
 })
 
 router.get('/gmail/drafts', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
   try {
-    const listData = await fetchGmailJson(
-      'https://gmail.googleapis.com/gmail/v1/users/me/drafts?maxResults=25',
-      token
-    )
+    const url = 'https://gmail.googleapis.com/gmail/v1/users/me/drafts?maxResults=25'
+    let listData
+    try {
+      listData = await fetchGmailJson(url, accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { accessToken = freshToken; listData = await fetchGmailJson(url, freshToken) }
+        else throw gmailError
+      } else throw gmailError
+    }
     const drafts = Array.isArray(listData.drafts) ? listData.drafts : []
 
     const normalizedDrafts = await Promise.all(
       drafts.map(async ({ id }) => {
         const draftData = await fetchGmailJson(
           `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${id}`,
-          token
+          accessToken
         )
         const headers = draftData.message?.payload?.headers || []
-
         return {
           id: draftData.id,
           to: getHeaderValue(headers, 'To'),
@@ -381,31 +392,25 @@ router.get('/gmail/drafts', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({
-        message: 'Failed to fetch Gmail drafts.',
-        gmail_error: error.gmailError,
-      })
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail drafts.', gmail_error: error.gmailError })
     }
-
     return next(error)
   }
 })
 
 router.post('/gmail/send', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
+
   const to = String(req.body?.to || '').trim()
   const subject = String(req.body?.subject || '').trim()
   const body = String(req.body?.body || '').trim()
   const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : []
-  console.log('[gmail-send] request body:', { to, subject, bodyLength: body.length, attachmentCount: attachments.length })
 
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
-
-  if (!to || !body) {
-    return res.status(400).json({ message: 'Missing required fields: to, body.' })
-  }
+  if (!to || !body) return res.status(400).json({ message: 'Missing required fields: to, body.' })
 
   const GMAIL_MAX_BYTES = 25 * 1024 * 1024
   for (const att of attachments) {
@@ -415,213 +420,240 @@ router.post('/gmail/send', async (req, res, next) => {
     }
   }
 
-  try {
-    const userEmail = await fetchGmailProfileEmail(token)
-    console.log('[gmail-send] profile fetch succeeded:', Boolean(userEmail))
-    console.log('[gmail-send] using From:', userEmail)
-
+  async function doSend(tok) {
+    const userEmail = await fetchGmailProfileEmail(tok)
     const rawEmail = buildRawEmail({ from: userEmail, to, subject, body, attachments })
-
     const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        raw: encodeBase64Url(rawEmail),
-      }),
+      headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw: encodeBase64Url(rawEmail) }),
     })
-
     if (!response.ok) {
       const errorText = await response.text()
-      console.error('GMAIL SEND ERROR:', errorText)
-      return res.status(response.status).json({
-        message: 'Failed to send Gmail email.',
-        gmail_error: errorText,
-      })
+      const err = new Error('Failed to send Gmail email.')
+      err.statusCode = response.status; err.gmailError = errorText; throw err
     }
+    return response.json()
+  }
 
-    const responseData = await response.json()
-    return res.status(200).json({
-      success: true,
-      id: responseData.id,
-    })
+  try {
+    let responseData
+    try {
+      responseData = await doSend(accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { responseData = await doSend(freshToken) }
+        else throw gmailError
+      } else throw gmailError
+    }
+    return res.status(200).json({ success: true, id: responseData.id })
   } catch (error) {
+    if (error.gmailError) {
+      console.error('GMAIL SEND ERROR:', error.gmailError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to send Gmail email.', gmail_error: error.gmailError })
+    }
     return next(error)
   }
 })
 
 router.post('/gmail/drafts', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
+
   const to = String(req.body?.to || '').trim()
   const subject = String(req.body?.subject || '').trim()
   const body = String(req.body?.body || '').trim()
 
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
-
-  try {
-    const userEmail = await fetchGmailProfileEmail(token)
+  async function doCreate(tok) {
+    const userEmail = await fetchGmailProfileEmail(tok)
     const raw = encodeBase64Url(buildRawEmail({ from: userEmail, to, subject, body }))
     const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: { raw },
-      }),
+      headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: { raw } }),
     })
-
     if (!response.ok) {
       const errorText = await response.text()
-      console.error('GMAIL DRAFT CREATE ERROR:', errorText)
-      return res.status(response.status).json({
-        message: 'Failed to create Gmail draft.',
-        gmail_error: errorText,
-      })
+      const err = new Error('Failed to create Gmail draft.')
+      err.statusCode = response.status; err.gmailError = errorText; throw err
     }
+    return response.json()
+  }
 
-    const responseData = await response.json()
-    return res.status(200).json({
-      success: true,
-      id: responseData.id,
-      message: responseData.message,
-    })
+  try {
+    let responseData
+    try {
+      responseData = await doCreate(accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { responseData = await doCreate(freshToken) }
+        else throw gmailError
+      } else throw gmailError
+    }
+    return res.status(200).json({ success: true, id: responseData.id, message: responseData.message })
   } catch (error) {
+    if (error.gmailError) {
+      console.error('GMAIL DRAFT CREATE ERROR:', error.gmailError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to create Gmail draft.', gmail_error: error.gmailError })
+    }
     return next(error)
   }
 })
 
 router.put('/gmail/drafts/:id', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
+
   const to = String(req.body?.to || '').trim()
   const subject = String(req.body?.subject || '').trim()
   const body = String(req.body?.body || '').trim()
+  const draftId = req.params.id
 
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
+  async function doUpdate(tok) {
+    const userEmail = await fetchGmailProfileEmail(tok)
+    const raw = encodeBase64Url(buildRawEmail({ from: userEmail, to, subject, body }))
+    const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: draftId, message: { raw } }),
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const err = new Error('Failed to update Gmail draft.')
+      err.statusCode = response.status; err.gmailError = errorText; throw err
+    }
+    return response.json()
   }
 
   try {
-    const userEmail = await fetchGmailProfileEmail(token)
-    const raw = encodeBase64Url(buildRawEmail({ from: userEmail, to, subject, body }))
-    const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${req.params.id}`, {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        id: req.params.id,
-        message: { raw },
-      }),
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('GMAIL DRAFT UPDATE ERROR:', errorText)
-      return res.status(response.status).json({
-        message: 'Failed to update Gmail draft.',
-        gmail_error: errorText,
-      })
+    let responseData
+    try {
+      responseData = await doUpdate(accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { responseData = await doUpdate(freshToken) }
+        else throw gmailError
+      } else throw gmailError
     }
-
-    const responseData = await response.json()
-    return res.status(200).json({
-      success: true,
-      id: responseData.id,
-      message: responseData.message,
-    })
+    return res.status(200).json({ success: true, id: responseData.id, message: responseData.message })
   } catch (error) {
+    if (error.gmailError) {
+      console.error('GMAIL DRAFT UPDATE ERROR:', error.gmailError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to update Gmail draft.', gmail_error: error.gmailError })
+    }
     return next(error)
   }
 })
 
 router.post('/gmail/drafts/:id/send', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
+  async function doSendDraft(tok) {
+    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: req.params.id }),
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const err = new Error('Failed to send Gmail draft.')
+      err.statusCode = response.status; err.gmailError = errorText; throw err
+    }
+    return response.json()
   }
 
   try {
-    const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/send`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        id: req.params.id,
-      }),
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('GMAIL DRAFT SEND ERROR:', errorText)
-      return res.status(response.status).json({
-        message: 'Failed to send Gmail draft.',
-        gmail_error: errorText,
-      })
+    let responseData
+    try {
+      responseData = await doSendDraft(accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { responseData = await doSendDraft(freshToken) }
+        else throw gmailError
+      } else throw gmailError
     }
-
-    const responseData = await response.json()
-    return res.status(200).json({
-      success: true,
-      id: responseData.id,
-      threadId: responseData.threadId,
-    })
+    return res.status(200).json({ success: true, id: responseData.id, threadId: responseData.threadId })
   } catch (error) {
+    if (error.gmailError) {
+      console.error('GMAIL DRAFT SEND ERROR:', error.gmailError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to send Gmail draft.', gmail_error: error.gmailError })
+    }
     return next(error)
   }
 })
 
 router.delete('/gmail/drafts/:id', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
+  async function doDelete(tok) {
+    const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${req.params.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${tok}` },
+    })
+    if (!response.ok) {
+      const errorText = await response.text()
+      const err = new Error('Failed to delete Gmail draft.')
+      err.statusCode = response.status; err.gmailError = errorText; throw err
+    }
   }
 
   try {
-    const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${req.params.id}`, {
-      method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('GMAIL DRAFT DELETE ERROR:', errorText)
-      return res.status(response.status).json({
-        message: 'Failed to delete Gmail draft.',
-        gmail_error: errorText,
-      })
+    try {
+      await doDelete(accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { await doDelete(freshToken) }
+        else throw gmailError
+      } else throw gmailError
     }
-
     return res.status(200).json({ success: true })
   } catch (error) {
+    if (error.gmailError) {
+      console.error('GMAIL DRAFT DELETE ERROR:', error.gmailError)
+      return res.status(error.statusCode || 500).json({ message: 'Failed to delete Gmail draft.', gmail_error: error.gmailError })
+    }
     return next(error)
   }
 })
 
 router.get('/gmail/:id', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
   try {
-    const messageData = await fetchGmailJson(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}`,
-      token
-    )
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}`
+    let messageData
+    try {
+      messageData = await fetchGmailJson(url, accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { accessToken = freshToken; messageData = await fetchGmailJson(url, freshToken) }
+        else throw gmailError
+      } else throw gmailError
+    }
     const normalizedMessage = normalizeGmailMessage(messageData)
     const { bodyText, bodyHtml, attachments } = extractBodiesFromPayload(messageData.payload)
 
@@ -634,41 +666,34 @@ router.get('/gmail/:id', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({
-        message: 'Failed to fetch Gmail message.',
-        gmail_error: error.gmailError,
-      })
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail message.', gmail_error: error.gmailError })
     }
-
     return next(error)
   }
 })
 
 router.patch('/gmail/:id/read', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-  const read = Boolean(req.body?.read)
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
+  const read = Boolean(req.body?.read)
+  const modifyBody = JSON.stringify(read ? { removeLabelIds: ['UNREAD'] } : { addLabelIds: ['UNREAD'] })
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}/modify`
+  const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: modifyBody }
 
   try {
-    await fetchGmailResponse(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}/modify`,
-      token,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(
-          read
-            ? { removeLabelIds: ['UNREAD'] }
-            : { addLabelIds: ['UNREAD'] }
-        ),
-      }
-    )
-
+    try {
+      await fetchGmailResponse(url, accessToken, opts)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { await fetchGmailResponse(url, freshToken, opts) }
+        else throw gmailError
+      } else throw gmailError
+    }
     return res.status(200).json({ ok: true, read })
   } catch (error) {
     if (error.gmailError) {
@@ -679,34 +704,32 @@ router.patch('/gmail/:id/read', async (req, res, next) => {
         reconnectRequired: error.statusCode === 401 || error.statusCode === 403,
       })
     }
-
     return next(error)
   }
 })
 
 router.patch('/gmail/:id/star', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-  const starred = Boolean(req.body?.starred)
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
-  if (!token) {
-    return res.status(401).json({ message: 'Missing authorization token.' })
-  }
+  const starred = Boolean(req.body?.starred)
+  const modifyBody = JSON.stringify(starred ? { addLabelIds: ['STARRED'] } : { removeLabelIds: ['STARRED'] })
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}/modify`
+  const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: modifyBody }
 
   try {
-    await fetchGmailResponse(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}/modify`,
-      token,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          starred
-            ? { addLabelIds: ['STARRED'] }
-            : { removeLabelIds: ['STARRED'] }
-        ),
-      }
-    )
-
+    try {
+      await fetchGmailResponse(url, accessToken, opts)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { await fetchGmailResponse(url, freshToken, opts) }
+        else throw gmailError
+      } else throw gmailError
+    }
     return res.status(200).json({ ok: true, starred })
   } catch (error) {
     if (error.gmailError) {
@@ -717,21 +740,29 @@ router.patch('/gmail/:id/star', async (req, res, next) => {
         reconnectRequired: error.statusCode === 401 || error.statusCode === 403,
       })
     }
-
     return next(error)
   }
 })
 
 router.get('/gmail/:id/attachments/:attachmentId', async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-  if (!token) return res.status(401).json({ message: 'Missing authorization token.' })
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  let { accessToken, refreshToken } = tokens
 
   try {
-    const data = await fetchGmailJson(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}/attachments/${req.params.attachmentId}`,
-      token
-    )
-    // data.data is base64url encoded binary
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}/attachments/${req.params.attachmentId}`
+    let data
+    try {
+      data = await fetchGmailJson(url, accessToken)
+    } catch (gmailError) {
+      if (gmailError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
+        if (freshToken) { data = await fetchGmailJson(url, freshToken) }
+        else throw gmailError
+      } else throw gmailError
+    }
     const buffer = Buffer.from((data.data || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64')
     res.setHeader('Content-Type', 'application/octet-stream')
     res.setHeader('Content-Length', buffer.length)
@@ -744,7 +775,7 @@ router.get('/gmail/:id/attachments/:attachmentId', async (req, res, next) => {
   }
 })
 
-// --- Outlook / Microsoft Graph ---
+// --- Shared auth helper ---
 
 async function getUserIdFromSupabaseToken(authHeader) {
   if (!authHeader?.startsWith('Bearer ')) return null
@@ -757,6 +788,47 @@ async function getUserIdFromSupabaseToken(authHeader) {
     return null
   }
 }
+
+// --- Gmail DB-based token helpers ---
+
+async function getGmailTokens(userId) {
+  const { data, error } = await supabaseAdmin
+    .from('connected_accounts')
+    .select('provider_access_token, provider_refresh_token')
+    .eq('user_id', userId)
+    .eq('provider', 'gmail')
+    .single()
+  if (error || !data?.provider_access_token) return null
+  return { accessToken: data.provider_access_token, refreshToken: data.provider_refresh_token || null }
+}
+
+async function tryRefreshGoogleToken(userId, refreshToken) {
+  if (!refreshToken || !process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) return null
+  try {
+    const params = new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    })
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    })
+    if (!response.ok) return null
+    const data = await response.json()
+    if (!data.access_token) return null
+    await supabaseAdmin
+      .from('connected_accounts')
+      .update({ provider_access_token: data.access_token })
+      .eq('user_id', userId)
+      .eq('provider', 'gmail')
+    return data.access_token
+  } catch { return null }
+}
+
+// --- Outlook DB-based token helpers ---
 
 async function getOutlookTokens(userId) {
   const { data, error } = await supabaseAdmin
