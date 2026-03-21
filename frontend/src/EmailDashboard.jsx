@@ -110,12 +110,13 @@ function normalizeGmailEmail(email) {
     internalDate: email.internalDate || null,
     labelIds,
     read: !labelIds.includes('UNREAD'),
-    starred: false,
+    starred: labelIds.includes('STARRED'),
     avatar: getAvatarFromSender(sender),
     avatarColor: 'bg-indigo-500',
     provider: 'gmail',
     pinned: false,
     bodyLoaded: Boolean(email.bodyText || email.bodyHtml),
+    attachments: Array.isArray(email.attachments) ? email.attachments : [],
   }
 }
 
@@ -124,11 +125,13 @@ function normalizeGmailSentEmail(email) {
 
   return {
     id: email.id,
-    to: email.fromName || email.fromEmail || email.from || '',
+    to: email.to || email.fromName || email.fromEmail || email.from || '',
     subject: email.subject || '(No Subject)',
     body: email.snippet || '',
     time,
     provider: 'gmail',
+    hasAttachments: Boolean(email.hasAttachments),
+    attachments: Array.isArray(email.attachments) ? email.attachments : [],
   }
 }
 
@@ -155,6 +158,8 @@ function normalizeOutlookSentEmail(email) {
     time,
     provider: 'outlook',
     conversationId: email.conversationId || email.id,
+    hasAttachments: Boolean(email.hasAttachments),
+    attachments: Array.isArray(email.attachments) ? email.attachments : [],
   }
 }
 
@@ -195,6 +200,8 @@ function normalizeOutlookEmail(email) {
     pinned: Boolean(email.flagged),
     bodyLoaded: Boolean(email.bodyText || email.bodyHtml),
     conversationId: email.conversationId || email.id,
+    hasAttachments: Boolean(email.hasAttachments),
+    attachments: Array.isArray(email.attachments) ? email.attachments : [],
   }
 }
 
@@ -246,6 +253,11 @@ function mergeEmailsById(existingEmails, nextEmails) {
       mergedEmail.bodyText = previousEmail.bodyText
       mergedEmail.bodyHtml = previousEmail.bodyHtml
       mergedEmail.bodyLoaded = previousEmail.bodyLoaded
+    }
+
+    // Preserve attachments from the detailed fetch
+    if (previousEmail.attachments?.length > 0 && !email.attachments?.length) {
+      mergedEmail.attachments = previousEmail.attachments
     }
 
     const gmailReadOverrideUntil = recentGmailReadOverrides.get(email.id) || 0
@@ -635,13 +647,6 @@ function ImageIcon({ className }) {
   )
 }
 
-function FolderIcon({ className }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 7.5A2.25 2.25 0 016 5.25h4.19c.597 0 1.17.237 1.591.659l.81.81c.422.422.994.659 1.591.659H18a2.25 2.25 0 012.25 2.25v6.75A2.25 2.25 0 0118 18.75H6a2.25 2.25 0 01-2.25-2.25V7.5z" />
-    </svg>
-  )
-}
 
 function ChevronRightIcon({ className }) {
   return (
@@ -651,56 +656,41 @@ function ChevronRightIcon({ className }) {
   )
 }
 
-function AttachmentMenu({ isOpen, anchorRef, onClose, onSelect }) {
-  const menuRef = useRef(null)
-
-  useEffect(() => {
-    if (!isOpen) return
-    function handleOutsideClick(e) {
-      if (!menuRef.current || !anchorRef?.current) return
-      if (menuRef.current.contains(e.target) || anchorRef.current.contains(e.target)) return
-      onClose()
-    }
-    document.addEventListener('mousedown', handleOutsideClick)
-    return () => document.removeEventListener('mousedown', handleOutsideClick)
-  }, [isOpen, onClose, anchorRef])
-
-  if (!isOpen || !anchorRef?.current) return null
-
-  const rect = anchorRef.current.getBoundingClientRect()
-
-  return (
-    <div
-      ref={menuRef}
-      className="fixed z-50 min-w-56 rounded-xl border border-slate-200 bg-white shadow-xl p-2"
-      style={{ top: rect.top - 166, left: rect.left }}
-      role="menu"
-      aria-label="Attachment options"
-    >
-      <button
-        onClick={() => onSelect('photos')}
-        className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-slate-700 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer"
-      >
-        <ImageIcon className="w-4 h-4 text-slate-500" />
-        Photos and videos
-      </button>
-      <button
-        onClick={() => onSelect('files')}
-        className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-slate-700 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer"
-      >
-        <FolderIcon className="w-4 h-4 text-slate-500" />
-        Other files
-      </button>
-      <button
-        onClick={() => onSelect('attachment')}
-        className="w-full text-left flex items-center gap-2 px-3 py-2 text-sm text-slate-700 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer"
-      >
-        <PaperclipIcon className="w-4 h-4 text-slate-500" />
-        Traditional attachment
-      </button>
-    </div>
-  )
+function formatFileSize(bytes) {
+  if (!bytes || bytes <= 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
+
+function AttachmentFileIcon({ mimeType = '' }) {
+  if (mimeType === 'application/pdf') {
+    return <span className="text-xs font-bold text-red-500 shrink-0">PDF</span>
+  }
+  if (mimeType.startsWith('image/')) {
+    return <ImageIcon className="w-4 h-4 text-green-500 shrink-0" />
+  }
+  if (mimeType.includes('word') || mimeType.includes('document')) {
+    return <span className="text-xs font-bold text-blue-600 shrink-0">DOC</span>
+  }
+  if (mimeType.includes('excel') || mimeType.includes('spreadsheet')) {
+    return <span className="text-xs font-bold text-green-600 shrink-0">XLS</span>
+  }
+  if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) {
+    return <span className="text-xs font-bold text-orange-500 shrink-0">PPT</span>
+  }
+  if (mimeType.startsWith('video/')) {
+    return <span className="text-xs font-bold text-purple-500 shrink-0">VID</span>
+  }
+  if (mimeType.startsWith('audio/')) {
+    return <span className="text-xs font-bold text-indigo-500 shrink-0">AUD</span>
+  }
+  if (mimeType.includes('zip') || mimeType.includes('compressed')) {
+    return <span className="text-xs font-bold text-yellow-600 shrink-0">ZIP</span>
+  }
+  return <PaperclipIcon className="w-4 h-4 text-slate-400 shrink-0" />
+}
+
 
 
 // --- Reusable Confirm Modal ---
@@ -846,7 +836,7 @@ function ConnectModal({ isOpen, provider, onCancel, onConnect }) {
 
 
 // --- Compose Modal (also used for editing drafts) ---
-function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, onSaveDraft, onSendEmail }) {
+function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, onSaveDraft, onSendEmail, activeProvider }) {
   const [to, setTo] = useState('')
   const [cc, setCc] = useState('')
   const [subject, setSubject] = useState('')
@@ -861,9 +851,9 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
   const [isSending, setIsSending] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
   const [draftSaveFailed, setDraftSaveFailed] = useState(false)
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const backdropRef = useRef(null)
   const attachmentButtonRef = useRef(null)
+  const fileInputRef = useRef(null)
   const isEditing = !!initialData
   const hasRecipient = to.trim().length > 0
   const hasPrompt = aiPrompt.trim().length > 0
@@ -910,20 +900,26 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     if (e.target === backdropRef.current) void handleClose()
   }
 
-  function handleAddAttachment(type = 'attachment') {
-    const namesByType = {
-      photos: ['photo-1.jpg', 'vacation.mp4', 'portrait.png'],
-      files: ['report.pdf', 'presentation.pptx', 'data.xlsx'],
-      attachment: ['notes.docx', 'attachment.zip', 'summary.txt'],
-    }
-    const names = namesByType[type] || namesByType.attachment
-    const name = names[attachments.length % names.length]
-    setAttachments((prev) => [...prev, { id: Date.now(), name }])
+  function handleAttachFileClick() {
+    fileInputRef.current?.click()
   }
 
-  function handleAttachmentOptionSelect(option) {
-    handleAddAttachment(option)
-    setAttachmentMenuOpen(false)
+  function handleFileInputChange(e) {
+    const maxBytes = activeProvider === 'outlook' ? 150 * 1024 * 1024 : 25 * 1024 * 1024
+    const limitLabel = activeProvider === 'outlook' ? '150 MB' : '25 MB'
+    const files = Array.from(e.target.files || [])
+    const errors = []
+    const valid = []
+    for (const file of files) {
+      if (file.size > maxBytes) {
+        errors.push(`"${file.name}" exceeds the ${limitLabel} limit.`)
+      } else {
+        valid.push({ id: Date.now() + Math.random(), name: file.name, mimeType: file.type || 'application/octet-stream', size: file.size, file })
+      }
+    }
+    if (errors.length > 0) setComposeMessage(errors.join(' '))
+    if (valid.length > 0) setAttachments((prev) => [...prev, ...valid])
+    e.target.value = ''
   }
 
   function handleRemoveAttachment(id) {
@@ -988,12 +984,24 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     if (onSendEmail) {
       try {
         setIsSending(true)
+        const encodedAttachments = await Promise.all(
+          attachments.map(
+            (a) =>
+              new Promise((resolve, reject) => {
+                const reader = new FileReader()
+                reader.onload = () => resolve({ name: a.name, mimeType: a.mimeType, data: reader.result.split(',')[1] })
+                reader.onerror = reject
+                reader.readAsDataURL(a.file)
+              })
+          )
+        )
         await onSendEmail({
           to,
           cc,
           subject,
           body: generatedBody || manualBody,
           draftId: isEditing ? initialData?.id : null,
+          attachments: encodedAttachments,
         })
       } catch (error) {
         setComposeMessage(error?.message || 'Failed to send email.')
@@ -1050,7 +1058,6 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
       setAiEditPrompt('')
       setManualBody('')
       setComposeMessage('')
-      setAttachmentMenuOpen(false)
       setIsSending(false)
       setIsClosing(false)
       setDraftSaveFailed(false)
@@ -1223,9 +1230,16 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
 
             {/* Actions */}
             <div className="flex items-center justify-between mt-5">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={handleFileInputChange}
+              />
               <button
                 ref={attachmentButtonRef}
-                onClick={() => setAttachmentMenuOpen((prev) => !prev)}
+                onClick={handleAttachFileClick}
                 className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors cursor-pointer"
               >
                 <PaperclipIcon className="w-4 h-4" />
@@ -1292,12 +1306,6 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
                 {composeMessage}
               </p>
             )}
-            <AttachmentMenu
-              isOpen={attachmentMenuOpen}
-              anchorRef={attachmentButtonRef}
-              onClose={() => setAttachmentMenuOpen(false)}
-              onSelect={handleAttachmentOptionSelect}
-            />
           </div>
         ) : (
           /* Review step */
@@ -1465,6 +1473,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [aiGeneratedMeta, setAiGeneratedMeta] = useState(null)
   const [aiActionMessage, setAiActionMessage] = useState('')
   const [aiActionTone, setAiActionTone] = useState('error')
+  const [inboxReplyAttachments, setInboxReplyAttachments] = useState([])
   const gmailPageLoadRef = useRef(false)
   const gmailDetailLoadRef = useRef(new Set())
   const outlookPageLoadRef = useRef(false)
@@ -1474,7 +1483,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const currentDrafts = activeProvider === 'gmail' ? gmailDrafts : outlookDrafts
   const currentSentEmails = activeProvider === 'gmail' ? gmailSentEmails : outlookSentEmails
   const setCurrentEmails = activeProvider === 'gmail' ? setGmailEmails : setOutlookEmails
-  const selectedEmail = currentEmails.find((e) => e.id === selectedEmailId) || currentEmails[0]
+  const selectedEmail = currentEmails.find((e) => e.id === selectedEmailId) ?? null
   const selectedEmailDetailLoading =
     (activeProvider === 'gmail' && gmailDetailLoadingId === selectedEmail?.id) ||
     (activeProvider === 'outlook' && outlookDetailLoadingId === selectedEmail?.id)
@@ -1718,6 +1727,31 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
   }, [connectedAccounts.gmail, fetchGmailEmailPage, getGoogleProviderToken])
 
+  const markGmailEmailStarState = useCallback(async (emailId, starred) => {
+    const token = await getGoogleProviderToken()
+    if (!token || !emailId) return
+
+    try {
+      const response = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}/star`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ starred }),
+      })
+      const responseData = await response.json()
+
+      if (!response.ok) {
+        throw new Error(responseData.gmail_error || responseData.message || 'Failed to sync Gmail star state.')
+      }
+    } catch (error) {
+      console.error('Failed to sync Gmail star state:', error)
+      // Revert optimistic update on failure
+      setGmailEmails((prev) => prev.map((em) => (em.id === emailId ? { ...em, starred: !starred } : em)))
+    }
+  }, [getGoogleProviderToken])
+
   const markGmailEmailReadState = useCallback(async (emailId, read) => {
     const token = await getGoogleProviderToken()
     if (!token || !emailId) return
@@ -1751,6 +1785,42 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const { data } = await supabase.auth.getSession()
     return data?.session?.access_token || null
   }, [])
+
+  const handleDownloadAttachment = useCallback(async (emailId, attachmentId, filename, provider) => {
+    try {
+      if (provider === 'gmail') {
+        const token = await getGoogleProviderToken()
+        if (!token) return
+        const res = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}/attachments/${attachmentId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!res.ok) return
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        a.click()
+        URL.revokeObjectURL(url)
+      } else {
+        const token = await getMicrosoftSupabaseToken()
+        if (!token) return
+        const res = await fetch(`http://localhost:5001/api/emails/outlook/${emailId}/attachments/${attachmentId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!res.ok) return
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        a.click()
+        URL.revokeObjectURL(url)
+      }
+    } catch (error) {
+      console.error('Failed to download attachment:', error)
+    }
+  }, [getGoogleProviderToken, getMicrosoftSupabaseToken])
 
   const createOutlookDraft = useCallback(async ({ to, subject, body }) => {
     const token = await getMicrosoftSupabaseToken()
@@ -1947,6 +2017,31 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       setOutlookDetailLoadingId((currentId) => (currentId === emailId ? null : currentId))
     }
   }, [getMicrosoftSupabaseToken])
+
+  const fetchSentEmailDetail = useCallback(async (emailId, provider) => {
+    if (!emailId) return null
+    try {
+      if (provider === 'gmail') {
+        const token = await getGoogleProviderToken()
+        if (!token) return null
+        const response = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!response.ok) return null
+        return await response.json()
+      } else {
+        const token = await getMicrosoftSupabaseToken()
+        if (!token) return null
+        const response = await fetch(`http://localhost:5001/api/emails/outlook/${emailId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!response.ok) return null
+        return await response.json()
+      }
+    } catch {
+      return null
+    }
+  }, [getGoogleProviderToken, getMicrosoftSupabaseToken])
 
   const markOutlookEmailReadState = useCallback(async (emailId, read) => {
     const token = await getMicrosoftSupabaseToken()
@@ -2299,11 +2394,10 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   useEffect(() => {
     const providerEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
-    if (providerEmails.length === 0) return
 
     const hasSelectedEmail = providerEmails.some((email) => email.id === selectedEmailId)
     if (!hasSelectedEmail) {
-      setSelectedEmailId(providerEmails[0].id)
+      setSelectedEmailId(null)
     }
   }, [activeProvider, connectedAccounts, gmailEmailState, outlookEmailState, selectedEmailId])
 
@@ -2341,7 +2435,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   function handleToggleStar(id, e) {
     if (e) e.stopPropagation()
-    setCurrentEmails((prev) => prev.map((em) => (em.id === id ? { ...em, starred: !em.starred } : em)))
+    const email = currentEmails.find((em) => em.id === id)
+    if (!email) return
+    const nowStarred = !email.starred
+    setCurrentEmails((prev) => prev.map((em) => (em.id === id ? { ...em, starred: nowStarred } : em)))
+    if (email.provider === 'gmail') {
+      void markGmailEmailStarState(id, nowStarred)
+    }
   }
 
   async function handleTogglePin(id, e) {
@@ -2557,12 +2657,17 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       threadRootId,
       replyToId: data.replyToId || null,
       time: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      attachments: Array.isArray(data.attachments) && data.attachments.length > 0
+        ? data.attachments.map((a) => ({ name: a.name, mimeType: a.mimeType }))
+        : [],
+      hasAttachments: Array.isArray(data.attachments) && data.attachments.length > 0,
     }
 
     if (provider === 'gmail') {
       let responseData
+      const hasAttachments = Array.isArray(data.attachments) && data.attachments.length > 0
 
-      if (data.draftId) {
+      if (data.draftId && !hasAttachments) {
         await updateGmailDraft(data.draftId, {
           to: sentEmail.to,
           subject: sentEmail.subject,
@@ -2585,6 +2690,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
             to: sentEmail.to,
             subject: sentEmail.subject,
             body: sentEmail.body,
+            replyToId: sentEmail.replyToId,
+            attachments: Array.isArray(data.attachments) ? data.attachments : [],
           }),
         })
         responseData = await response.json()
@@ -2605,7 +2712,9 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       const token = await getMicrosoftSupabaseToken()
       if (!token) throw new Error('Missing Outlook token.')
 
-      if (data.draftId) {
+      const hasAttachments = Array.isArray(data.attachments) && data.attachments.length > 0
+
+      if (data.draftId && !hasAttachments) {
         await updateOutlookDraft(data.draftId, {
           to: sentEmail.to,
           subject: sentEmail.subject,
@@ -2616,7 +2725,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         const response = await fetch('http://localhost:5001/api/emails/outlook/send', {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to: sentEmail.to, subject: sentEmail.subject, body: sentEmail.body }),
+          body: JSON.stringify({
+            to: sentEmail.to,
+            subject: sentEmail.subject,
+            body: sentEmail.body,
+            replyToId: sentEmail.replyToId,
+            attachments: Array.isArray(data.attachments) ? data.attachments : [],
+          }),
         })
         const responseData = await response.json()
         if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to send Outlook email.')
@@ -2789,7 +2904,22 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
   }
 
-  function handleRequestDirectSend() {
+  async function encodeReplyAttachments() {
+    return Promise.all(
+      inboxReplyAttachments.map(
+        (file) =>
+          new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () =>
+              resolve({ name: file.name, mimeType: file.type || 'application/octet-stream', data: reader.result.split(',')[1] })
+            reader.onerror = reject
+            reader.readAsDataURL(file)
+          })
+      )
+    )
+  }
+
+  async function handleRequestDirectSend() {
     let payload = null
 
     if (aiGeneratedEmail.trim() && aiGeneratedMeta) {
@@ -2823,6 +2953,9 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       return
     }
 
+    const encodedAttachments = await encodeReplyAttachments()
+    payload.attachments = encodedAttachments
+
     setAiActionMessage('')
 
     setDirectSendModal({
@@ -2839,6 +2972,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
 
     try {
+      const encodedAttachments = await encodeReplyAttachments()
       await handleSendEmail({
         to: aiGeneratedMeta.to,
         subject: aiGeneratedMeta.subject,
@@ -2847,11 +2981,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         replyToId: aiGeneratedMeta.replyToId,
         threadRootId: aiGeneratedMeta.threadRootId,
         draftId: aiGeneratedMeta.draftId || null,
+        attachments: encodedAttachments,
       })
 
       setAiPrompt('')
       setAiGeneratedEmail('')
       setAiGeneratedMeta(null)
+      setInboxReplyAttachments([])
       setAiActionMessage('Email sent.')
       setAiActionTone('success')
     } catch (error) {
@@ -3032,10 +3168,12 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               onGenerateRequest={handleInboxGenerate}
               onDirectSendRequest={handleRequestDirectSend}
               onSendGeneratedRequest={handleSendGeneratedFromExpanded}
+              onReplyAttachmentsChange={setInboxReplyAttachments}
               outlookConversationMessages={outlookConversationMessages}
               loadingConversationIds={loadingConversationIds}
               failedConversationIds={failedConversationIds}
               onLoadConversation={fetchOutlookConversation}
+              onDownloadAttachment={handleDownloadAttachment}
             />
           )}
           {activePage === 'drafts' && (
@@ -3063,12 +3201,16 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           )}
           {activePage === 'sent' && (
             <SentPage
-              sentEmails={currentSentEmails}
+              gmailSentEmails={gmailSentEmails}
+              outlookSentEmails={outlookSentEmails}
               selectedSentEmailId={selectedSentEmailId}
               onSelectSentEmail={setSelectedSentEmailId}
               gmailEmails={gmailEmailState}
               outlookEmails={outlookEmailState}
-              activeProvider={activeProvider}
+              defaultProvider={activeProvider}
+              connectedAccounts={connectedAccounts}
+              onFetchSentDetail={fetchSentEmailDetail}
+              onDownloadAttachment={handleDownloadAttachment}
               outlookConversationMessages={outlookConversationMessages}
               loadingConversationIds={loadingConversationIds}
               onLoadConversation={fetchOutlookConversation}
@@ -3134,6 +3276,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
             setAiPrompt('')
             setAiGeneratedEmail('')
             setAiGeneratedMeta(null)
+            setInboxReplyAttachments([])
             setAiActionMessage('Email sent.')
             setAiActionTone('success')
           } catch (error) {
@@ -3218,6 +3361,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           setEditingDraft(null)
           return true
         }}
+        activeProvider={activeProvider}
         signature={signature}
         useSignature={useSignature}
         initialData={editingDraft}
@@ -3286,10 +3430,16 @@ function InboxPage({
   loadingConversationIds,
   failedConversationIds,
   onLoadConversation,
+  onDownloadAttachment,
+  onReplyAttachmentsChange,
 }) {
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const [expandedThreadIds, setExpandedThreadIds] = useState(new Set())
-  const attachmentButtonRef = useRef(null)
+  const [replyAttachments, setReplyAttachments] = useState([])
+  const replyFileInputRef = useRef(null)
+
+  useEffect(() => {
+    onReplyAttachmentsChange?.(replyAttachments)
+  }, [replyAttachments, onReplyAttachmentsChange])
   const emailListRef = useRef(null)
   const groupedEmails = activeProvider === 'gmail' ? groupEmailsByDate(emails) : []
   const outlookThreads = activeProvider === 'outlook' ? groupOutlookEmailsByThread(emails) : []
@@ -3718,13 +3868,43 @@ function InboxPage({
                   title={`Email content for ${selectedEmail.subject}`}
                   sandbox="allow-popups allow-popups-to-escape-sandbox"
                   srcDoc={buildEmailHtmlDocument(selectedEmail.bodyHtml)}
-                  className="w-full min-h-[70vh] rounded-xl border border-slate-200 bg-white"
+                  className="w-full rounded-xl border border-slate-200 bg-white"
+                  style={{ minHeight: '60px' }}
+                  onLoad={(e) => {
+                    const doc = e.target.contentDocument
+                    if (doc) {
+                      e.target.style.height = (doc.documentElement.scrollHeight || doc.body?.scrollHeight || 120) + 'px'
+                    }
+                  }}
                 />
               ) : (
                 <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
                   {selectedEmail.bodyText || selectedEmail.preview || 'No message content available.'}
                 </pre>
               )}
+              {(selectedEmail.attachments?.length > 0 || (selectedEmail.provider === 'outlook' && selectedEmail.hasAttachments && !selectedEmail.bodyLoaded)) && (
+                <div className="mt-4 pt-4 border-t border-slate-100">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-3">
+                    Attachments{selectedEmail.attachments?.length > 0 ? ` (${selectedEmail.attachments.length})` : ''}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {(selectedEmail.attachments || []).map((att) => (
+                      <button
+                        key={att.attachmentId}
+                        onClick={() => onDownloadAttachment?.(selectedEmail.id, att.attachmentId, att.filename, selectedEmail.provider)}
+                        className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors text-sm text-slate-700 cursor-pointer max-w-xs"
+                      >
+                        <AttachmentFileIcon mimeType={att.mimeType} />
+                        <span className="truncate">{att.filename}</span>
+                        {att.size > 0 && (
+                          <span className="text-xs text-slate-400 shrink-0">{formatFileSize(att.size)}</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {threadReplies.length > 0 && (
                 <div className="mt-6 space-y-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Thread Replies</p>
@@ -3782,10 +3962,35 @@ function InboxPage({
                   </div>
                 </div>
               )}
+              {replyAttachments.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {replyAttachments.map((f, i) => (
+                    <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-slate-100 rounded-full text-slate-600">
+                      <PaperclipIcon className="w-3 h-3" />
+                      {f.name}
+                      <button
+                        onClick={() => setReplyAttachments((prev) => prev.filter((_, j) => j !== i))}
+                        className="ml-0.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        aria-label="Remove attachment"
+                      >×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <input
+                type="file"
+                multiple
+                className="hidden"
+                ref={replyFileInputRef}
+                onChange={(e) => {
+                  const files = Array.from(e.target.files || [])
+                  if (files.length > 0) setReplyAttachments((prev) => [...prev, ...files])
+                  e.target.value = ''
+                }}
+              />
               <div className="flex items-center justify-between mt-2">
                 <button
-                  ref={attachmentButtonRef}
-                  onClick={() => setAttachmentMenuOpen((prev) => !prev)}
+                  onClick={() => replyFileInputRef.current?.click()}
                   className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
                   aria-label="Attach file"
                 >
@@ -3813,12 +4018,6 @@ function InboxPage({
                   {aiActionMessage}
                 </p>
               )}
-              <AttachmentMenu
-                isOpen={attachmentMenuOpen}
-                anchorRef={attachmentButtonRef}
-                onClose={() => setAttachmentMenuOpen(false)}
-                onSelect={() => setAttachmentMenuOpen(false)}
-              />
             </div>
           </>
         ) : (
@@ -3894,16 +4093,33 @@ function DraftsPage({ drafts, onDeleteRequest, onEditRequest }) {
   )
 }
 
-function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEmails, outlookEmails, activeProvider, outlookConversationMessages, loadingConversationIds, onLoadConversation }) {
+function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onSelectSentEmail, gmailEmails, outlookEmails, defaultProvider, connectedAccounts, onFetchSentDetail, onDownloadAttachment, outlookConversationMessages, loadingConversationIds, onLoadConversation }) {
   const [expandedSentThreadIds, setExpandedSentThreadIds] = useState(new Set())
+  const [sentProvider, setSentProvider] = useState(() => {
+    if (defaultProvider === 'outlook' && (outlookSentEmails?.length > 0 || connectedAccounts?.outlook)) return 'outlook'
+    return 'gmail'
+  })
+  const [detailCache, setDetailCache] = useState({})
+  const sentEmails = sentProvider === 'gmail' ? (gmailSentEmails || []) : (outlookSentEmails || [])
+  const showToggle = connectedAccounts?.gmail && connectedAccounts?.outlook
   const selectedSentEmail = sentEmails.find((email) => email.id === selectedSentEmailId) || sentEmails[0]
+
+  useEffect(() => {
+    if (!selectedSentEmail || !onFetchSentDetail) return
+    const id = selectedSentEmail.id
+    // Only fetch if not a fresh in-session send (those have full body already)
+    if (String(id).startsWith('s') || detailCache[id]) return
+    onFetchSentDetail(id, selectedSentEmail.provider || sentProvider).then((data) => {
+      if (data) setDetailCache((prev) => ({ ...prev, [id]: data }))
+    })
+  }, [selectedSentEmail?.id])
   const allProviderEmails = [...gmailEmails, ...outlookEmails]
   const relatedEmailId = selectedSentEmail ? (selectedSentEmail.replyToId || selectedSentEmail.threadRootId) : null
   const repliedToEmail = relatedEmailId
     ? allProviderEmails.find((email) => String(email.id) === String(relatedEmailId))
     : null
 
-  const outlookSentThreads = activeProvider === 'outlook' ? groupOutlookEmailsByThread(sentEmails) : []
+  const outlookSentThreads = sentProvider === 'outlook' ? groupOutlookEmailsByThread(sentEmails) : []
 
   function toggleSentThread(conversationId, e) {
     e.stopPropagation()
@@ -3926,13 +4142,29 @@ function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEma
     <div className="h-full bg-white flex">
       <div className="w-full md:w-80 lg:w-[340px] border-r border-slate-200 flex flex-col shrink-0">
         <div className="px-4 py-4 border-b border-slate-100">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 mb-2">
             <SentIcon className="w-5 h-5 text-slate-400" />
             <h2 className="text-lg font-bold text-slate-900">Sent</h2>
             <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
               {sentEmails.length}
             </span>
           </div>
+          {showToggle && (
+            <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+              <button
+                onClick={() => setSentProvider('gmail')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'gmail' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <span className="text-[10px]">M</span> Gmail
+              </button>
+              <button
+                onClick={() => setSentProvider('outlook')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'outlook' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <span className="text-[10px]">⊞</span> Outlook
+              </button>
+            </div>
+          )}
         </div>
         <div className="flex-1 overflow-y-auto">
           {sentEmails.length === 0 ? (
@@ -3940,7 +4172,7 @@ function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEma
               <SentIcon className="w-10 h-10 mx-auto mb-3" />
               <p className="text-sm font-medium">No sent emails yet</p>
             </div>
-          ) : activeProvider === 'outlook' ? (
+          ) : sentProvider === 'outlook' ? (
             outlookSentThreads.map((thread) => {
               const isExpanded = expandedSentThreadIds.has(thread.conversationId)
               const isLoading = loadingConversationIds?.has(thread.conversationId)
@@ -4033,7 +4265,12 @@ function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEma
               >
                 <div className="flex items-center justify-between mb-1">
                   <p className="text-sm font-semibold text-slate-900 truncate">To: {email.to}</p>
-                  <span className="text-xs text-slate-400 shrink-0 ml-3">{email.time}</span>
+                  <div className="flex items-center gap-1.5 shrink-0 ml-3">
+                    {(email.hasAttachments || email.attachments?.length > 0) && (
+                      <PaperclipIcon className="w-3 h-3 text-slate-400" />
+                    )}
+                    <span className="text-xs text-slate-400">{email.time}</span>
+                  </div>
                 </div>
                 <p className="text-sm font-medium text-slate-700 truncate">{email.subject}</p>
                 <p className="text-xs text-slate-500 truncate">{email.body}</p>
@@ -4044,15 +4281,51 @@ function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEma
       </div>
 
       <div className="flex-1 min-w-0 overflow-y-auto">
-        {selectedSentEmail ? (
+        {selectedSentEmail ? (() => {
+          const cached = detailCache[selectedSentEmail.id]
+          const fullBody = cached?.bodyHtml || cached?.bodyText || selectedSentEmail.body
+          const isHtml = Boolean(cached?.bodyHtml)
+          const attachments = selectedSentEmail.attachments?.length > 0
+            ? selectedSentEmail.attachments
+            : (cached?.attachments || [])
+          return (
           <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
             <div className="rounded-xl border border-slate-200 p-5">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Sent Email</p>
               <p className="text-xs text-slate-500 mb-1">To: {selectedSentEmail.to}</p>
               <p className="text-sm font-semibold text-slate-900 mb-2">{selectedSentEmail.subject}</p>
-              <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
-                {selectedSentEmail.body}
-              </pre>
+              {isHtml ? (
+                <div
+                  className="text-sm text-slate-700 leading-relaxed prose prose-sm max-w-none"
+                  dangerouslySetInnerHTML={{ __html: fullBody }}
+                />
+              ) : (
+                <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
+                  {fullBody}
+                </pre>
+              )}
+              {attachments.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-slate-100">
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Attachments</p>
+                  <div className="flex flex-wrap gap-2">
+                    {attachments.map((att, i) => (
+                      <button
+                        key={i}
+                        onClick={() => onDownloadAttachment?.(
+                          selectedSentEmail.id,
+                          att.attachmentId || att.id,
+                          att.filename || att.name,
+                          selectedSentEmail.provider || sentProvider
+                        )}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs text-slate-700 transition-colors cursor-pointer"
+                      >
+                        <PaperclipIcon className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <span className="truncate max-w-[200px]">{att.filename || att.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {repliedToEmail && (
@@ -4068,7 +4341,8 @@ function SentPage({ sentEmails, selectedSentEmailId, onSelectSentEmail, gmailEma
               </div>
             )}
           </div>
-        ) : (
+        )
+        })() : (
           <div className="h-full flex items-center justify-center text-slate-400">
             <div className="text-center">
               <SentIcon className="w-10 h-10 mx-auto mb-3" />

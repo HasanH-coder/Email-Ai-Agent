@@ -60,9 +60,24 @@ function extractBodiesFromPayload(payload) {
   const result = {
     bodyText: '',
     bodyHtml: '',
+    attachments: [],
   }
 
   if (!payload) {
+    return result
+  }
+
+  const filename = payload.filename || ''
+  const disposition = (payload.headers || []).find((h) => h.name?.toLowerCase() === 'content-disposition')?.value || ''
+  const isAttachment = Boolean(filename) || disposition.toLowerCase().startsWith('attachment')
+
+  if (isAttachment && payload.body?.attachmentId) {
+    result.attachments.push({
+      attachmentId: payload.body.attachmentId,
+      filename: filename || 'attachment',
+      mimeType: payload.mimeType || 'application/octet-stream',
+      size: payload.body.size || 0,
+    })
     return result
   }
 
@@ -83,6 +98,7 @@ function extractBodiesFromPayload(payload) {
     if (!result.bodyHtml && childBodies.bodyHtml) {
       result.bodyHtml = childBodies.bodyHtml
     }
+    result.attachments.push(...childBodies.attachments)
   }
 
   if (!result.bodyText && payload.body?.data) {
@@ -99,6 +115,9 @@ function normalizeGmailMessage(messageData) {
   const date = getHeaderValue(headers, 'Date')
   const { fromName, fromEmail } = parseFromHeader(from)
 
+  const parts = messageData.payload?.parts || []
+  const hasAttachments = parts.some((p) => p.filename && p.filename.length > 0)
+
   return {
     id: messageData.id,
     subject,
@@ -109,6 +128,7 @@ function normalizeGmailMessage(messageData) {
     date,
     internalDate: messageData.internalDate || null,
     labelIds: Array.isArray(messageData.labelIds) ? messageData.labelIds : [],
+    hasAttachments,
   }
 }
 
@@ -180,16 +200,49 @@ async function fetchGmailProfileEmail(token) {
   return profile.emailAddress
 }
 
-function buildRawEmail({ from, to, subject, body }) {
-  return [
+function buildRawEmail({ from, to, subject, body, attachments = [] }) {
+  if (attachments.length === 0) {
+    return [
+      `From: ${from}`,
+      `To: ${to}`,
+      `Subject: ${subject || '(No Subject)'}`,
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset="UTF-8"',
+      '',
+      body,
+    ].join('\r\n')
+  }
+
+  const boundary = `mp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`
+  const lines = [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject || '(No Subject)'}`,
     'MIME-Version: 1.0',
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
     'Content-Type: text/plain; charset="UTF-8"',
     '',
     body,
-  ].join('\r\n')
+  ]
+
+  for (const att of attachments) {
+    const safeFilename = (att.name || 'attachment').replace(/"/g, '')
+    lines.push(`--${boundary}`)
+    lines.push(`Content-Type: ${att.mimeType || 'application/octet-stream'}; name="${safeFilename}"`)
+    lines.push('Content-Transfer-Encoding: base64')
+    lines.push(`Content-Disposition: attachment; filename="${safeFilename}"`)
+    lines.push('')
+    // Split base64 into 76-character lines per RFC 2045
+    const b64 = att.data || ''
+    for (let i = 0; i < b64.length; i += 76) {
+      lines.push(b64.slice(i, i + 76))
+    }
+  }
+
+  lines.push(`--${boundary}--`)
+  return lines.join('\r\n')
 }
 
 router.get('/gmail', async (req, res, next) => {
@@ -271,7 +324,7 @@ router.get('/gmail/sent', async (req, res, next) => {
 
   try {
     const listData = await fetchGmailJson(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=SENT&maxResults=25',
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=SENT&maxResults=50',
       token
     )
     const messages = Array.isArray(listData.messages) ? listData.messages : []
@@ -343,7 +396,8 @@ router.post('/gmail/send', async (req, res, next) => {
   const to = String(req.body?.to || '').trim()
   const subject = String(req.body?.subject || '').trim()
   const body = String(req.body?.body || '').trim()
-  console.log('[gmail-send] request body:', { to, subject, bodyLength: body.length })
+  const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : []
+  console.log('[gmail-send] request body:', { to, subject, bodyLength: body.length, attachmentCount: attachments.length })
 
   if (!token) {
     return res.status(401).json({ message: 'Missing authorization token.' })
@@ -353,12 +407,20 @@ router.post('/gmail/send', async (req, res, next) => {
     return res.status(400).json({ message: 'Missing required fields: to, body.' })
   }
 
+  const GMAIL_MAX_BYTES = 25 * 1024 * 1024
+  for (const att of attachments) {
+    const sizeBytes = Math.ceil((att.data?.length || 0) * 3 / 4)
+    if (sizeBytes > GMAIL_MAX_BYTES) {
+      return res.status(400).json({ message: `Attachment "${att.name}" exceeds the 25 MB Gmail limit.` })
+    }
+  }
+
   try {
     const userEmail = await fetchGmailProfileEmail(token)
     console.log('[gmail-send] profile fetch succeeded:', Boolean(userEmail))
     console.log('[gmail-send] using From:', userEmail)
 
-    const rawEmail = buildRawEmail({ from: userEmail, to, subject, body })
+    const rawEmail = buildRawEmail({ from: userEmail, to, subject, body, attachments })
 
     const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
@@ -561,12 +623,13 @@ router.get('/gmail/:id', async (req, res, next) => {
       token
     )
     const normalizedMessage = normalizeGmailMessage(messageData)
-    const { bodyText, bodyHtml } = extractBodiesFromPayload(messageData.payload)
+    const { bodyText, bodyHtml, attachments } = extractBodiesFromPayload(messageData.payload)
 
     return res.status(200).json({
       ...normalizedMessage,
       bodyText: bodyText || (bodyHtml ? stripHtml(bodyHtml) : normalizedMessage.snippet),
       bodyHtml: bodyHtml || '',
+      attachments,
     })
   } catch (error) {
     if (error.gmailError) {
@@ -617,6 +680,66 @@ router.patch('/gmail/:id/read', async (req, res, next) => {
       })
     }
 
+    return next(error)
+  }
+})
+
+router.patch('/gmail/:id/star', async (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '')
+  const starred = Boolean(req.body?.starred)
+
+  if (!token) {
+    return res.status(401).json({ message: 'Missing authorization token.' })
+  }
+
+  try {
+    await fetchGmailResponse(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}/modify`,
+      token,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          starred
+            ? { addLabelIds: ['STARRED'] }
+            : { removeLabelIds: ['STARRED'] }
+        ),
+      }
+    )
+
+    return res.status(200).json({ ok: true, starred })
+  } catch (error) {
+    if (error.gmailError) {
+      console.error('GMAIL API ERROR:', error.gmailError)
+      return res.status(error.statusCode || 500).json({
+        message: 'Failed to update Gmail star state.',
+        gmail_error: error.gmailError,
+        reconnectRequired: error.statusCode === 401 || error.statusCode === 403,
+      })
+    }
+
+    return next(error)
+  }
+})
+
+router.get('/gmail/:id/attachments/:attachmentId', async (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '')
+  if (!token) return res.status(401).json({ message: 'Missing authorization token.' })
+
+  try {
+    const data = await fetchGmailJson(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${req.params.id}/attachments/${req.params.attachmentId}`,
+      token
+    )
+    // data.data is base64url encoded binary
+    const buffer = Buffer.from((data.data || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64')
+    res.setHeader('Content-Type', 'application/octet-stream')
+    res.setHeader('Content-Length', buffer.length)
+    return res.send(buffer)
+  } catch (error) {
+    if (error.gmailError) {
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail attachment.', gmail_error: error.gmailError })
+    }
     return next(error)
   }
 })
@@ -703,6 +826,7 @@ function normalizeOutlookMessage(msg) {
     isRead: Boolean(msg.isRead),
     conversationId: msg.conversationId || msg.id,
     flagged: msg.flag?.flagStatus === 'flagged',
+    hasAttachments: Boolean(msg.hasAttachments),
   }
 }
 
@@ -720,7 +844,7 @@ router.get('/outlook', async (req, res, next) => {
     const skipToken = typeof req.query.skipToken === 'string' ? req.query.skipToken : ''
     const params = new URLSearchParams({
       '$top': String(maxResults),
-      '$select': 'id,subject,from,receivedDateTime,bodyPreview,isRead,conversationId,flag',
+      '$select': 'id,subject,from,receivedDateTime,bodyPreview,isRead,conversationId,flag,hasAttachments',
       '$orderby': 'receivedDateTime desc',
     })
     if (skipToken) params.set('$skipToken', skipToken)
@@ -773,7 +897,7 @@ router.get('/outlook/sent', async (req, res, next) => {
   let { accessToken, refreshToken } = tokens
 
   try {
-    const url = 'https://graph.microsoft.com/v1.0/me/mailFolders/SentItems/messages?$top=25&$select=id,subject,toRecipients,sentDateTime,bodyPreview,conversationId&$orderby=sentDateTime%20desc'
+    const url = 'https://graph.microsoft.com/v1.0/me/mailFolders/SentItems/messages?$top=50&$select=id,subject,toRecipients,sentDateTime,bodyPreview,conversationId,hasAttachments&$orderby=sentDateTime%20desc'
 
     let data
     try {
@@ -805,6 +929,7 @@ router.get('/outlook/sent', async (req, res, next) => {
           date: msg.sentDateTime || null,
           internalDate: msg.sentDateTime ? new Date(msg.sentDateTime).getTime() : null,
           conversationId: msg.conversationId || msg.id,
+          hasAttachments: Boolean(msg.hasAttachments),
         }
       }),
     })
@@ -880,25 +1005,42 @@ router.post('/outlook/send', async (req, res, next) => {
   const to = String(req.body?.to || '').trim()
   const subject = String(req.body?.subject || '').trim()
   const body = String(req.body?.body || '').trim()
+  const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : []
 
   if (!to || !body) {
     return res.status(400).json({ message: 'Missing required fields: to, body.' })
   }
 
+  const OUTLOOK_MAX_BYTES = 150 * 1024 * 1024
+  for (const att of attachments) {
+    const sizeBytes = Math.ceil((att.data?.length || 0) * 3 / 4)
+    if (sizeBytes > OUTLOOK_MAX_BYTES) {
+      return res.status(400).json({ message: `Attachment "${att.name}" exceeds the 150 MB Outlook limit.` })
+    }
+  }
+
   let { accessToken, refreshToken } = tokens
 
   async function doSend(token) {
+    const messagePayload = {
+      subject: subject || '(No Subject)',
+      body: { contentType: 'Text', content: body },
+      toRecipients: [{ emailAddress: { address: to } }],
+    }
+
+    if (attachments.length > 0) {
+      messagePayload.attachments = attachments.map((att) => ({
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: att.name || 'attachment',
+        contentType: att.mimeType || 'application/octet-stream',
+        contentBytes: att.data || '',
+      }))
+    }
+
     const response = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: {
-          subject: subject || '(No Subject)',
-          body: { contentType: 'Text', content: body },
-          toRecipients: [{ emailAddress: { address: to } }],
-        },
-        saveToSentItems: true,
-      }),
+      body: JSON.stringify({ message: messagePayload, saveToSentItems: true }),
     })
     if (!response.ok) {
       const errorText = await response.text()
@@ -1277,7 +1419,7 @@ router.get('/outlook/:id', async (req, res, next) => {
   let { accessToken, refreshToken } = tokens
 
   try {
-    const url = `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}?$select=id,subject,from,receivedDateTime,bodyPreview,isRead,body`
+    const url = `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}?$select=id,subject,from,receivedDateTime,bodyPreview,isRead,body,hasAttachments,conversationId,flag`
 
     let msg
     try {
@@ -1302,11 +1444,74 @@ router.get('/outlook/:id', async (req, res, next) => {
       ? (msg.body?.content || '')
       : (bodyHtml ? stripHtml(bodyHtml) : normalized.snippet)
 
-    return res.status(200).json({ ...normalized, bodyText, bodyHtml })
+    let attachments = []
+    if (msg.hasAttachments) {
+      try {
+        const attData = await fetchGraphJson(
+          `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}/attachments?$select=id,name,contentType,size`,
+          accessToken
+        )
+        attachments = (Array.isArray(attData.value) ? attData.value : []).map((a) => ({
+          attachmentId: a.id,
+          filename: a.name || 'attachment',
+          mimeType: a.contentType || 'application/octet-stream',
+          size: a.size || 0,
+        }))
+      } catch {
+        // Non-fatal: attachment list unavailable
+      }
+    }
+
+    return res.status(200).json({ ...normalized, bodyText, bodyHtml, attachments })
   } catch (error) {
     if (error.graphError) {
       console.error('GRAPH API ERROR (detail):', error.graphError)
       return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook message.', graph_error: error.graphError })
+    }
+    return next(error)
+  }
+})
+
+router.get('/outlook/:id/attachments/:attachmentId', async (req, res, next) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected.' })
+
+  let { accessToken, refreshToken } = tokens
+
+  async function fetchAtt(token) {
+    return fetchGraphJson(
+      `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}/attachments/${req.params.attachmentId}`,
+      token
+    )
+  }
+
+  try {
+    let attachment
+    try {
+      attachment = await fetchAtt(accessToken)
+    } catch (graphError) {
+      if (graphError.statusCode === 401 && refreshToken) {
+        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (freshToken) {
+          attachment = await fetchAtt(freshToken)
+        } else {
+          throw graphError
+        }
+      } else {
+        throw graphError
+      }
+    }
+
+    const buffer = Buffer.from(attachment.contentBytes || '', 'base64')
+    res.setHeader('Content-Type', attachment.contentType || 'application/octet-stream')
+    res.setHeader('Content-Length', buffer.length)
+    return res.send(buffer)
+  } catch (error) {
+    if (error.graphError) {
+      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook attachment.', graph_error: error.graphError })
     }
     return next(error)
   }

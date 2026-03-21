@@ -265,7 +265,7 @@ export default function App() {
           // couldn't get the session in time), navigate to the dashboard now.
           if (!cancelled && typeof window !== 'undefined') {
             const path = window.location.pathname
-            if (path === '/auth/callback' || path === '/') {
+            if (path === '/auth/callback') {
               window.history.replaceState({}, '', '/dashboard')
               setCurrentPage('dashboard')
             }
@@ -432,11 +432,8 @@ export default function App() {
     if (!authReady || !authSession?.access_token) return
     if (window.location.pathname === '/dashboard') {
       setCurrentPage('dashboard')
-      return
     }
-
-    window.history.replaceState({}, '', '/dashboard')
-    setCurrentPage('dashboard')
+    // Don't auto-redirect from the landing page — let users click through manually
   }, [authReady, authSession?.access_token])
 
   async function handleDevLogin() {
