@@ -3956,22 +3956,34 @@ function InboxPage({
               </div>
             </div>
 
-            {/* Scrollable email body */}
-            <div className="flex-1 overflow-y-auto px-6 py-5">
+            {/* Scrollable area: email body + attachments + thread + AI assistant */}
+            <div className="flex-1 overflow-y-auto">
+            <div className="px-6 py-5">
               {selectedEmailDetailLoading ? (
                 <p className="text-sm text-slate-400">Loading full message...</p>
               ) : selectedEmail.bodyHtml ? (
                 <iframe
                   title={`Email content for ${selectedEmail.subject}`}
-                  sandbox="allow-popups allow-popups-to-escape-sandbox"
+                  sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"
                   srcDoc={buildEmailHtmlDocument(selectedEmail.bodyHtml)}
                   className="w-full rounded-xl border border-slate-200 bg-white"
-                  style={{ minHeight: '60px' }}
+                  style={{ display: 'block' }}
                   onLoad={(e) => {
-                    const doc = e.target.contentDocument
-                    if (doc) {
-                      e.target.style.height = (doc.documentElement.scrollHeight || doc.body?.scrollHeight || 120) + 'px'
+                    const iframe = e.target
+                    const doc = iframe.contentDocument
+                    if (!doc || !doc.body) return
+                    const fit = () => {
+                      // allow full height so scrollHeight is accurate
+                      doc.body.style.overflow = 'visible'
+                      if (doc.documentElement) doc.documentElement.style.overflow = 'visible'
+                      const h = Math.max(doc.body.scrollHeight, doc.body.offsetHeight, 40)
+                      iframe.style.height = h + 'px'
+                      // hide iframe's own scrollbar — outer panel handles scrolling
+                      doc.body.style.overflow = 'hidden'
+                      if (doc.documentElement) doc.documentElement.style.overflow = 'hidden'
                     }
+                    fit()
+                    setTimeout(fit, 600)
                   }}
                 />
               ) : (
@@ -4024,8 +4036,8 @@ function InboxPage({
               )}
             </div>
 
-            {/* AI Assistant - sticky at bottom */}
-            <div className="border-t border-slate-100 px-5 py-4 bg-slate-50/70 shrink-0">
+            {/* AI Assistant */}
+            <div className="border-t border-slate-100 px-5 py-4 bg-slate-50/70">
               <div className="flex items-center gap-2 mb-2">
                 <SparklesIcon className="w-4 h-4 text-indigo-500" />
                 <span className="text-xs font-semibold text-slate-600">AI Assistant</span>
@@ -4115,6 +4127,7 @@ function InboxPage({
                   {aiActionMessage}
                 </p>
               )}
+            </div>
             </div>
           </>
         ) : (

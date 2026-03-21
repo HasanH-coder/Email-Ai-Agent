@@ -210,13 +210,34 @@ export default function App() {
 
         const session = data?.session ?? null
 
-        if (session?.access_token) {
+        const isPageRefresh = sessionStorage.getItem('mailpilot.session_active') === 'true'
+
+        if (session?.access_token && currentPath === '/auth/callback') {
+          sessionStorage.setItem('mailpilot.session_active', 'true')
           setAuthSession(session)
           setStoredToken(session.access_token)
           await refreshConnectedAccountRows(supabase, session.user?.id)
-          if (!cancelled && typeof window !== 'undefined' && currentPath === '/auth/callback') {
+          if (!cancelled && typeof window !== 'undefined') {
             window.history.replaceState({}, '', '/dashboard')
             setCurrentPage('dashboard')
+          }
+        } else if (session?.access_token && isPageRefresh) {
+          // Page refresh — user was already logged in, restore their session
+          setAuthSession(session)
+          setStoredToken(session.access_token)
+          await refreshConnectedAccountRows(supabase, session.user?.id)
+          if (!cancelled && currentPath === '/dashboard') {
+            setCurrentPage('dashboard')
+          }
+        } else if (session?.access_token) {
+          // New tab/browser with a stale cached session — sign out so the
+          // user always sees the login screen and must authenticate explicitly.
+          await supabase.auth.signOut()
+          if (!cancelled) {
+            clearStoredToken()
+            setAuthSession(null)
+            setAuthUser(null)
+            setConnectedAccountRows([])
           }
         } else if (currentPath === '/auth/callback' && authCode) {
           // The OAuth code was present but getSession() returned null — this happens when
@@ -257,6 +278,7 @@ export default function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_IN') {
+        sessionStorage.setItem('mailpilot.session_active', 'true')
         setAuthSession(session ?? null)
         if (session?.access_token) {
           setStoredToken(session.access_token)
@@ -471,6 +493,7 @@ export default function App() {
       setAuthSession(session)
       setStoredToken(session.access_token)
     }
+    sessionStorage.setItem('mailpilot.session_active', 'true')
     if (window.location.pathname !== '/dashboard') {
       window.history.pushState({}, '', '/dashboard')
     }
@@ -478,6 +501,7 @@ export default function App() {
   }
 
   async function handleSignOut() {
+    sessionStorage.removeItem('mailpilot.session_active')
     const { sessionCleared } = await logout()
     setAuthSession(null)
     setAuthUser(null)
