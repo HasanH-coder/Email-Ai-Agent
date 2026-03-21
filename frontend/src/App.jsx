@@ -133,6 +133,33 @@ export default function App() {
       })
       .filter(Boolean)
 
+    // Enforce only one provider can be connected at a time.
+    // If both exist in the DB, determine which to keep:
+    // 1. Use the providerHint from localStorage (set during OAuth flow)
+    // 2. Otherwise use the current Supabase session's OAuth provider
+    const hasGmail = normalizedRows.some((r) => r.provider === 'gmail')
+    const hasOutlook = normalizedRows.some((r) => r.provider === 'outlook')
+
+    if (hasGmail && hasOutlook) {
+      let keepProvider = null
+      const hint = localStorage.getItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
+      if (hint === 'gmail' || hint === 'outlook') {
+        keepProvider = hint
+      } else {
+        const { data: sessionData } = await supabase.auth.getSession()
+        const sessionProvider = sessionData?.session?.user?.app_metadata?.provider
+        keepProvider = normalizeConnectedProvider(sessionProvider) || 'gmail'
+      }
+      const dropProvider = keepProvider === 'gmail' ? 'outlook' : 'gmail'
+      await supabase
+        .from('connected_accounts')
+        .delete()
+        .eq('user_id', userId)
+        .eq('provider', dropProvider)
+      setConnectedAccountRows(normalizedRows.filter((r) => r.provider !== dropProvider))
+      return
+    }
+
     setConnectedAccountRows(normalizedRows)
   }
 
@@ -413,6 +440,14 @@ export default function App() {
         console.error('Failed to upsert connected account:', upsertError)
         return
       }
+
+      // Disconnect the other provider so only one is active at a time
+      const otherProvider = providerHint === 'gmail' ? 'outlook' : 'gmail'
+      await supabase
+        .from('connected_accounts')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('provider', otherProvider)
 
       await refreshConnectedAccountRows(supabase, user.id)
       } finally {

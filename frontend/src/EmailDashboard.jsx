@@ -836,7 +836,7 @@ function ConnectModal({ isOpen, provider, onCancel, onConnect }) {
 
 
 // --- Compose Modal (also used for editing drafts) ---
-function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, activeProvider }) {
+function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, activeProvider, signature, useSignature }) {
   const [to, setTo] = useState('')
   const [cc, setCc] = useState('')
   const [subject, setSubject] = useState('')
@@ -955,7 +955,9 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
     setIsGenerating(true)
     setComposeMessage('')
     try {
-      const emailText = await callGenerateEmailApi(prompt)
+      let emailText = await callGenerateEmailApi(prompt)
+      const effectiveSig = useSignature ? signature : ''
+      if (effectiveSig) emailText = emailText + '\n\n' + effectiveSig
       setGeneratedBody(emailText)
       setStep('review')
     } catch (error) {
@@ -973,6 +975,8 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
     let body = ''
     try {
       body = await callGenerateEmailApi(prompt)
+      const effectiveSig = useSignature ? signature : ''
+      if (effectiveSig) body = body + '\n\n' + effectiveSig
     } catch (error) {
       setComposeMessage(error?.message || 'Failed to generate email.')
       setIsGenerating(false)
@@ -2603,9 +2607,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }
 
   function handleConnect(provider, email) {
+    const other = provider === 'gmail' ? 'outlook' : 'gmail'
+    writeProviderTokenStatus(other, false)
     writeProviderTokenStatus(provider, true)
-    setConnectedAccounts((prev) => ({ ...prev, [provider]: true }))
-    setConnectedEmails((prev) => ({ ...prev, [provider]: email }))
+    setConnectedAccounts({ [provider]: true, [other]: false })
+    setConnectedEmails((prev) => ({ ...prev, [provider]: email, [other]: '' }))
     if (connectModal.fromInbox) {
       setActiveProvider(provider)
       const providerEmails = provider === 'gmail' ? gmailEmailState : outlookEmailState
