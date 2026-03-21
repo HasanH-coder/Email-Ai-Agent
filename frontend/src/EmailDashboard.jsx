@@ -836,7 +836,7 @@ function ConnectModal({ isOpen, provider, onCancel, onConnect }) {
 
 
 // --- Compose Modal (also used for editing drafts) ---
-function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, onSaveDraft, onSendEmail, activeProvider }) {
+function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, activeProvider }) {
   const [to, setTo] = useState('')
   const [cc, setCc] = useState('')
   const [subject, setSubject] = useState('')
@@ -849,6 +849,7 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
   const [manualBody, setManualBody] = useState('')
   const [composeMessage, setComposeMessage] = useState('')
   const [isSending, setIsSending] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
   const [draftSaveFailed, setDraftSaveFailed] = useState(false)
   const backdropRef = useRef(null)
@@ -926,28 +927,58 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     setAttachments((prev) => prev.filter((a) => a.id !== id))
   }
 
-  function getSignatureText() {
-    if (!useSignature || !signature) return ''
-    return '\n\n' + signature
+  async function getSupabaseAccessToken() {
+    const supabase = getSupabase()
+    if (!supabase) return null
+    const { data } = await supabase.auth.getSession()
+    return data?.session?.access_token || null
   }
 
-  function buildGeneratedBodyFromPrompt(promptText) {
-    return `Dear recipient,\n\nThank you for your message. I wanted to follow up regarding ${promptText.toLowerCase().slice(0, 80)}.\n\nI have reviewed the details and would like to share my thoughts:\n\n1. The proposed timeline looks reasonable and achievable.\n2. I suggest we schedule a follow-up meeting to discuss the specifics.\n3. Please let me know if you need any additional information from my end.\n\nI look forward to hearing from you.${getSignatureText() || '\n\nBest regards'}`
+  async function callGenerateEmailApi(userPrompt) {
+    const token = await getSupabaseAccessToken()
+    const response = await fetch('http://localhost:5001/api/ai/generate-email', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ recipient: to, subject, userPrompt }),
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || 'Failed to generate email.')
+    return data.emailText
   }
 
-  function handleGenerate() {
+  async function handleGenerate() {
     if (!canGenerate) return
     const prompt = (isEditing && editMode === 'manual' ? manualBody : aiPrompt).trim() || subject || 'a professional email'
-    const body = buildGeneratedBodyFromPrompt(prompt)
-    setGeneratedBody(body)
-    setStep('review')
+    setIsGenerating(true)
     setComposeMessage('')
+    try {
+      const emailText = await callGenerateEmailApi(prompt)
+      setGeneratedBody(emailText)
+      setStep('review')
+    } catch (error) {
+      setComposeMessage(error?.message || 'Failed to generate email.')
+    } finally {
+      setIsGenerating(false)
+    }
   }
 
   async function handleGenerateAndSend() {
     if (!canGenerateInNewEmail) return
     const prompt = (isEditing && editMode === 'manual' ? manualBody : aiPrompt).trim() || subject || 'a professional email'
-    const body = buildGeneratedBodyFromPrompt(prompt)
+    setIsGenerating(true)
+    setComposeMessage('')
+    let body = ''
+    try {
+      body = await callGenerateEmailApi(prompt)
+    } catch (error) {
+      setComposeMessage(error?.message || 'Failed to generate email.')
+      setIsGenerating(false)
+      return
+    }
+    setIsGenerating(false)
     if (onSendEmail) {
       try {
         setIsSending(true)
@@ -968,16 +999,23 @@ function ComposeModal({ isOpen, onClose, signature, useSignature, initialData, o
     await handleClose({ saveDraft: false })
   }
 
-  function handleAiRewrite() {
+  async function handleAiRewrite() {
     if (!hasRecipient) {
       setComposeMessage('Enter a recipient email in the To field first.')
       return
     }
     const prompt = aiEditPrompt.trim() || 'more professional and concise'
-    const body = `Dear recipient,\n\nI am writing to follow up on our previous correspondence. After careful consideration, I would like to address the following points:\n\nRegarding "${prompt}":\n\n1. I have thoroughly reviewed the materials and believe we are well-positioned to move forward.\n2. Our team has prepared a comprehensive analysis that addresses the key concerns.\n3. I would appreciate the opportunity to discuss this further at your earliest convenience.\n\nPlease do not hesitate to reach out if you have any questions.${getSignatureText() || '\n\nBest regards'}`
-    setManualBody(body)
-    setAiEditPrompt('')
+    setIsGenerating(true)
     setComposeMessage('')
+    try {
+      const emailText = await callGenerateEmailApi(prompt)
+      setManualBody(emailText)
+      setAiEditPrompt('')
+    } catch (error) {
+      setComposeMessage(error?.message || 'Failed to generate email.')
+    } finally {
+      setIsGenerating(false)
+    }
   }
 
   async function handleSend() {
@@ -1508,6 +1546,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
     const { data } = await supabase.auth.getSession()
     return data?.session?.provider_token || null
+  }, [])
+
+  const getSupabaseAccessToken = useCallback(async () => {
+    const supabase = getSupabase()
+    if (!supabase) return null
+    const { data } = await supabase.auth.getSession()
+    return data?.session?.access_token || null
   }, [])
 
   const createGmailDraft = useCallback(async ({ to, subject, body }) => {
@@ -2799,21 +2844,6 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return sentEmail
   }
 
-  function buildInboxReply(promptText) {
-    if (!selectedEmail) return null
-    const generatedReply = `Hi ${selectedEmail.sender.split(' ')[0]},\n\nThanks for your email. I am following up regarding ${promptText}.\n\nI reviewed everything and we can move forward. Let me know if you want me to share more details.\n\nBest regards`
-    const body = effectiveSignature ? `${generatedReply}\n\n${effectiveSignature}` : generatedReply
-    return {
-      to: selectedEmail.email,
-      subject: `Re: ${selectedEmail.subject}`,
-      body,
-      provider: selectedEmail.provider || activeProvider,
-      replyToId: selectedEmail.id,
-      threadRootId: selectedEmail.threadRootId || selectedEmail.id,
-      conversationId: selectedEmail.conversationId || null,
-    }
-  }
-
   async function handleInboxGenerate() {
     if (!aiPrompt.trim()) {
       setAiActionMessage('Please type a prompt first before you can generate or send the email.')
@@ -2825,8 +2855,43 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       setAiActionTone('error')
       return
     }
-    const payload = buildInboxReply(aiPrompt.trim())
-    if (!payload) return
+
+    setAiActionMessage('')
+
+    let emailText = ''
+    try {
+      const token = await getSupabaseAccessToken()
+      const response = await fetch('http://localhost:5001/api/ai/generate-email', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          recipient: selectedEmail.email,
+          subject: `Re: ${selectedEmail.subject}`,
+          userPrompt: aiPrompt.trim(),
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Failed to generate email.')
+      emailText = data.emailText
+      if (effectiveSignature) emailText = emailText + '\n\n' + effectiveSignature
+    } catch (error) {
+      setAiActionMessage(error?.message || 'Failed to generate email.')
+      setAiActionTone('error')
+      return
+    }
+
+    const payload = {
+      to: selectedEmail.email,
+      subject: `Re: ${selectedEmail.subject}`,
+      body: emailText,
+      provider: selectedEmail.provider || activeProvider,
+      replyToId: selectedEmail.id,
+      threadRootId: selectedEmail.threadRootId || selectedEmail.id,
+      conversationId: selectedEmail.conversationId || null,
+    }
 
     try {
       let draftId = null
@@ -2944,7 +3009,39 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         setAiActionTone('error')
         return
       }
-      payload = buildInboxReply(prompt)
+
+      try {
+        const token = await getSupabaseAccessToken()
+        const response = await fetch('http://localhost:5001/api/ai/generate-email', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            recipient: selectedEmail.email,
+            subject: `Re: ${selectedEmail.subject}`,
+            userPrompt: prompt,
+          }),
+        })
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.error || 'Failed to generate email.')
+        let emailText = data.emailText
+        if (effectiveSignature) emailText = emailText + '\n\n' + effectiveSignature
+        payload = {
+          to: selectedEmail.email,
+          subject: `Re: ${selectedEmail.subject}`,
+          body: emailText,
+          provider: selectedEmail.provider || activeProvider,
+          replyToId: selectedEmail.id,
+          threadRootId: selectedEmail.threadRootId || selectedEmail.id,
+          conversationId: selectedEmail.conversationId || null,
+        }
+      } catch (error) {
+        setAiActionMessage(error?.message || 'Failed to generate email.')
+        setAiActionTone('error')
+        return
+      }
     }
 
     if (!payload) {
