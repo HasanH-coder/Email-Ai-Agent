@@ -415,11 +415,18 @@ export default function App() {
         return
       }
 
-      // Persist Gmail token to localStorage so it survives Supabase session switches
-      // (when Outlook is connected later, the Supabase session changes to Microsoft,
-      // losing the Google provider_token from the session object)
-      if (providerHint === 'gmail' && accessToken) {
-        localStorage.setItem('mailpilot.gmail_access_token', accessToken)
+      // On fresh login, remove all other providers from the DB so they don't
+      // auto-connect. Each provider must be explicitly reconnected per session.
+      const otherProviders = ['gmail', 'outlook'].filter(p => p !== providerHint)
+      for (const other of otherProviders) {
+        const { error: deleteError } = await supabase
+          .from('connected_accounts')
+          .delete()
+          .eq('user_id', user.id)
+          .eq('provider', other)
+        if (deleteError) {
+          console.error(`Failed to clear ${other} connected account on fresh login:`, deleteError)
+        }
       }
 
       await refreshConnectedAccountRows(supabase, user.id)
