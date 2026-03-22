@@ -15,7 +15,7 @@ router.get('/me', authMiddleware, me)
 // backend OAuth flow so we never create a new Supabase user or switch sessions.
 
 // Redirect URI must already be registered in Azure — use the frontend dashboard URL
-const MICROSOFT_FRONTEND_REDIRECT = 'http://localhost:5173/dashboard'
+const MICROSOFT_FRONTEND_REDIRECT = process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL}/dashboard` : 'http://localhost:5173/dashboard'
 
 router.get('/microsoft/authorize', authMiddleware, (req, res) => {
   const userId = req.user.userId
