@@ -1416,24 +1416,31 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
                   className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
                 />
                 <button
-                  disabled={!canGenerateInNewEmail}
-                  onClick={() => {
+                  disabled={!canGenerateInNewEmail || isGenerating}
+                  onClick={async () => {
                     if (!canGenerateInNewEmail) {
                       setComposeMessage('Enter a recipient in To and a prompt before regenerating.')
                       return
                     }
-                    const body = buildGeneratedBodyFromPrompt(aiPrompt.trim())
-                    setGeneratedBody(body)
+                    setIsGenerating(true)
                     setComposeMessage('')
+                    try {
+                      const emailText = await callGenerateEmailApi(aiPrompt.trim())
+                      setGeneratedBody(emailText)
+                    } catch (error) {
+                      setComposeMessage(error?.message || 'Failed to regenerate email.')
+                    } finally {
+                      setIsGenerating(false)
+                    }
                   }}
                   className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl transition-colors ${
-                    canGenerateInNewEmail
+                    canGenerateInNewEmail && !isGenerating
                       ? 'text-white bg-indigo-600 hover:bg-indigo-700 cursor-pointer'
                       : 'text-slate-400 bg-slate-200 cursor-not-allowed'
                   }`}
                 >
                   <SparklesIcon className="w-4 h-4" />
-                  Regenerate
+                  {isGenerating ? 'Regenerating...' : 'Regenerate'}
                 </button>
               </div>
             </div>
