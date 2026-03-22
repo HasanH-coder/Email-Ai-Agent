@@ -3,7 +3,7 @@ import { getSupabase } from './supabaseClient'
 const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
 const CONNECTING_PROVIDER_STARTED_AT_KEY = 'connecting_provider_started_at'
 const OAUTH_CALLBACK_PATH = '/auth/callback'
-const BACKEND_URL = 'http://localhost:5001'
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5001'
 
 function getOAuthRedirectUrl() {
   return `${window.location.origin}${OAUTH_CALLBACK_PATH}`

@@ -4,6 +4,8 @@ import { getSupabase } from './services/supabaseClient'
 
 
 
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5001'
+
 const EMAIL_STORAGE_KEYS = {
   gmail: 'mailpilot:gmailEmails',
   outlook: 'mailpilot:outlookEmails:v2',
@@ -401,7 +403,7 @@ async function resolveGmailLogoUrl(domain) {
 
   const request = (async () => {
     try {
-      const response = await fetch(`http://localhost:5001/api/logo?domain=${encodeURIComponent(domain)}`)
+      const response = await fetch(`${BACKEND_URL}/api/logo?domain=${encodeURIComponent(domain)}`)
       const responseData = await response.json()
       const nextLogoUrl = response.ok ? (responseData.logoUrl || null) : null
       console.log('[gmail-avatar] backend logo URL result:', { domain, logoUrl: nextLogoUrl, ok: response.ok })
@@ -936,7 +938,7 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
 
   async function callGenerateEmailApi(userPrompt) {
     const token = await getSupabaseAccessToken()
-    const response = await fetch('http://localhost:5001/api/ai/generate-email', {
+    const response = await fetch(`${BACKEND_URL}/api/ai/generate-email`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1569,7 +1571,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       throw new Error('Missing Gmail provider token.')
     }
 
-    const response = await fetch('http://localhost:5001/api/emails/gmail/drafts', {
+    const response = await fetch(`${BACKEND_URL}/api/emails/gmail/drafts`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1592,7 +1594,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       throw new Error('Missing Gmail provider token.')
     }
 
-    const response = await fetch(`http://localhost:5001/api/emails/gmail/drafts/${draftId}`, {
+    const response = await fetch(`${BACKEND_URL}/api/emails/gmail/drafts/${draftId}`, {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1615,7 +1617,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       throw new Error('Missing Gmail provider token.')
     }
 
-    const response = await fetch(`http://localhost:5001/api/emails/gmail/drafts/${draftId}/send`, {
+    const response = await fetch(`${BACKEND_URL}/api/emails/gmail/drafts/${draftId}/send`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1637,7 +1639,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       throw new Error('Missing Gmail provider token.')
     }
 
-    const response = await fetch(`http://localhost:5001/api/emails/gmail/drafts/${draftId}`, {
+    const response = await fetch(`${BACKEND_URL}/api/emails/gmail/drafts/${draftId}`, {
       method: 'DELETE',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1662,7 +1664,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     setGmailDetailLoadingId(emailId)
 
     try {
-      const response = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}`, {
+      const response = await fetch(`${BACKEND_URL}/api/emails/gmail/${emailId}`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -1691,7 +1693,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       params.set('pageToken', pageToken)
     }
 
-    const response = await fetch(`http://localhost:5001/api/emails/gmail?${params.toString()}`, {
+    const response = await fetch(`${BACKEND_URL}/api/emails/gmail?${params.toString()}`, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -1785,7 +1787,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     if (!token || !emailId) return
 
     try {
-      const response = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}/star`, {
+      const response = await fetch(`${BACKEND_URL}/api/emails/gmail/${emailId}/star`, {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -1810,7 +1812,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     if (!token || !emailId) return
 
     try {
-      const response = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}/read`, {
+      const response = await fetch(`${BACKEND_URL}/api/emails/gmail/${emailId}/read`, {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -1844,7 +1846,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       if (provider === 'gmail') {
         const token = await getGoogleProviderToken()
         if (!token) return
-        const res = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}/attachments/${attachmentId}`, {
+        const res = await fetch(`${BACKEND_URL}/api/emails/gmail/${emailId}/attachments/${attachmentId}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) return
@@ -1858,7 +1860,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       } else {
         const token = await getMicrosoftSupabaseToken()
         if (!token) return
-        const res = await fetch(`http://localhost:5001/api/emails/outlook/${emailId}/attachments/${attachmentId}`, {
+        const res = await fetch(`${BACKEND_URL}/api/emails/outlook/${emailId}/attachments/${attachmentId}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) return
@@ -1879,7 +1881,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const token = await getMicrosoftSupabaseToken()
     if (!token) throw new Error('Missing Outlook token.')
 
-    const response = await fetch('http://localhost:5001/api/emails/outlook/drafts', {
+    const response = await fetch(`${BACKEND_URL}/api/emails/outlook/drafts`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ to, subject, body }),
@@ -1893,7 +1895,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const token = await getMicrosoftSupabaseToken()
     if (!token) throw new Error('Missing Outlook token.')
 
-    const response = await fetch(`http://localhost:5001/api/emails/outlook/drafts/${draftId}`, {
+    const response = await fetch(`${BACKEND_URL}/api/emails/outlook/drafts/${draftId}`, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ to, subject, body }),
@@ -1907,7 +1909,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const token = await getMicrosoftSupabaseToken()
     if (!token) throw new Error('Missing Outlook token.')
 
-    const response = await fetch(`http://localhost:5001/api/emails/outlook/drafts/${draftId}/send`, {
+    const response = await fetch(`${BACKEND_URL}/api/emails/outlook/drafts/${draftId}/send`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -1920,7 +1922,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const token = await getMicrosoftSupabaseToken()
     if (!token) throw new Error('Missing Outlook token.')
 
-    const response = await fetch(`http://localhost:5001/api/emails/outlook/drafts/${draftId}`, {
+    const response = await fetch(`${BACKEND_URL}/api/emails/outlook/drafts/${draftId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -1946,7 +1948,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
     try {
       const response = await fetch(
-        `http://localhost:5001/api/emails/outlook/conversation/${encodeURIComponent(conversationId)}`,
+        `${BACKEND_URL}/api/emails/outlook/conversation/${encodeURIComponent(conversationId)}`,
         { headers: { Authorization: `Bearer ${token}` } }
       )
       const data = await response.json()
@@ -2004,7 +2006,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       const params = new URLSearchParams({ maxResults: '25' })
       if (skipToken) params.set('skipToken', skipToken)
 
-      const response = await fetch(`http://localhost:5001/api/emails/outlook?${params.toString()}`, {
+      const response = await fetch(`${BACKEND_URL}/api/emails/outlook?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const responseData = await response.json()
@@ -2051,7 +2053,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     setOutlookDetailLoadingId(emailId)
 
     try {
-      const response = await fetch(`http://localhost:5001/api/emails/outlook/${emailId}`, {
+      const response = await fetch(`${BACKEND_URL}/api/emails/outlook/${emailId}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const responseData = await response.json()
@@ -2077,7 +2079,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       if (provider === 'gmail') {
         const token = await getGoogleProviderToken()
         if (!token) return null
-        const response = await fetch(`http://localhost:5001/api/emails/gmail/${emailId}`, {
+        const response = await fetch(`${BACKEND_URL}/api/emails/gmail/${emailId}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!response.ok) return null
@@ -2085,7 +2087,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       } else {
         const token = await getMicrosoftSupabaseToken()
         if (!token) return null
-        const response = await fetch(`http://localhost:5001/api/emails/outlook/${emailId}`, {
+        const response = await fetch(`${BACKEND_URL}/api/emails/outlook/${emailId}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!response.ok) return null
@@ -2101,7 +2103,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     if (!token || !emailId) return
 
     try {
-      const response = await fetch(`http://localhost:5001/api/emails/outlook/${emailId}/read`, {
+      const response = await fetch(`${BACKEND_URL}/api/emails/outlook/${emailId}/read`, {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -2246,7 +2248,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       }
 
       try {
-        const response = await fetch('http://localhost:5001/api/emails/gmail/sent', {
+        const response = await fetch(`${BACKEND_URL}/api/emails/gmail/sent`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
@@ -2292,7 +2294,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       }
 
       try {
-        const response = await fetch('http://localhost:5001/api/emails/gmail/drafts', {
+        const response = await fetch(`${BACKEND_URL}/api/emails/gmail/drafts`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
@@ -2338,7 +2340,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       }
 
       try {
-        const response = await fetch('http://localhost:5001/api/emails/outlook/sent', {
+        const response = await fetch(`${BACKEND_URL}/api/emails/outlook/sent`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         const responseData = await response.json()
@@ -2382,7 +2384,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       }
 
       try {
-        const response = await fetch('http://localhost:5001/api/emails/outlook/drafts', {
+        const response = await fetch(`${BACKEND_URL}/api/emails/outlook/drafts`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         const responseData = await response.json()
@@ -2517,7 +2519,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     try {
       const token = await getMicrosoftSupabaseToken()
       if (!token) throw new Error('No token')
-      const res = await fetch(`http://localhost:5001/api/emails/outlook/${id}/flag`, {
+      const res = await fetch(`${BACKEND_URL}/api/emails/outlook/${id}/flag`, {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ flagged: nowPinned }),
@@ -2737,7 +2739,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           throw new Error('Missing Gmail provider token.')
         }
 
-        const response = await fetch('http://localhost:5001/api/emails/gmail/send', {
+        const response = await fetch(`${BACKEND_URL}/api/emails/gmail/send`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -2779,7 +2781,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         })
         await sendOutlookDraft(data.draftId)
       } else {
-        const response = await fetch('http://localhost:5001/api/emails/outlook/send', {
+        const response = await fetch(`${BACKEND_URL}/api/emails/outlook/send`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2873,7 +2875,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     let emailText = ''
     try {
       const token = await getMicrosoftSupabaseToken()
-      const response = await fetch('http://localhost:5001/api/ai/generate-email', {
+      const response = await fetch(`${BACKEND_URL}/api/ai/generate-email`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -3024,7 +3026,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
       try {
         const token = await getMicrosoftSupabaseToken()
-        const response = await fetch('http://localhost:5001/api/ai/generate-email', {
+        const response = await fetch(`${BACKEND_URL}/api/ai/generate-email`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,

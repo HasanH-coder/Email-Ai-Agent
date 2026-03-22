@@ -5,6 +5,8 @@ import { apiFetch, clearStoredToken, setStoredToken } from './services/api'
 import { getMe, login, logout } from './services/auth'
 import { getSupabase } from './services/supabaseClient'
 
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5001'
+
 const CONNECTING_PROVIDER_KEY = 'connecting_provider'
 const CONNECTING_PROVIDER_STARTED_AT_KEY = 'connecting_provider_started_at'
 const PROVIDER_TOKEN_STATUS_KEY = 'mailpilot.provider_token_status'
@@ -496,7 +498,7 @@ export default function App() {
       } catch { /* ignore */ }
 
       if (provider === 'outlook') {
-        fetch('http://localhost:5001/api/auth/microsoft/exchange', {
+        fetch(`${BACKEND_URL}/api/auth/microsoft/exchange`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

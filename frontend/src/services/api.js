@@ -13,9 +13,9 @@ export function clearStoredToken() {
 }
 
 export async function apiFetch(path, options = {}) {
-  const baseUrl = import.meta.env.VITE_API_URL
+  const baseUrl = import.meta.env.VITE_BACKEND_URL
   if (!baseUrl) {
-    throw new Error('Missing VITE_API_URL in frontend environment variables.')
+    throw new Error('Missing VITE_BACKEND_URL in frontend environment variables.')
   }
 
   const token = getStoredToken()
