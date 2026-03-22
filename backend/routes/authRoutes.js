@@ -14,16 +14,17 @@ router.get('/me', authMiddleware, me)
 // The user is already logged in (has a Supabase session). We use a custom
 // backend OAuth flow so we never create a new Supabase user or switch sessions.
 
-// Redirect URI must already be registered in Azure — use the frontend dashboard URL
-const MICROSOFT_FRONTEND_REDIRECT = process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL}/dashboard` : 'http://localhost:5173/dashboard'
+// Redirect URI registered in Azure — must point to this backend callback route.
+const MICROSOFT_BACKEND_REDIRECT = `${process.env.PUBLIC_BACKEND_URL || 'http://localhost:5001'}/api/auth/microsoft/callback`
 
 router.get('/microsoft/authorize', authMiddleware, (req, res) => {
   const userId = req.user.userId
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
 
   const params = new URLSearchParams({
     client_id: process.env.MICROSOFT_CLIENT_ID,
     response_type: 'code',
-    redirect_uri: MICROSOFT_FRONTEND_REDIRECT,
+    redirect_uri: MICROSOFT_BACKEND_REDIRECT,
     scope: [
       'openid', 'profile', 'email', 'offline_access',
       'https://graph.microsoft.com/User.Read',
@@ -32,19 +33,34 @@ router.get('/microsoft/authorize', authMiddleware, (req, res) => {
       'https://graph.microsoft.com/Mail.Send',
     ].join(' '),
     prompt: 'consent',
-    state: Buffer.from(JSON.stringify({ userId, provider: 'outlook' })).toString('base64'),
+    state: Buffer.from(JSON.stringify({ userId, frontendUrl })).toString('base64'),
   })
 
   const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params.toString()}`
   return res.json({ url })
 })
 
-// Frontend sends the code here after Microsoft redirects back to /dashboard?code=...
-router.post('/microsoft/exchange', authMiddleware, async (req, res) => {
-  const { code } = req.body || {}
-  const userId = req.user.userId
+// Microsoft redirects here after the user logs in (mirrors the Google callback flow).
+router.get('/microsoft/callback', async (req, res) => {
+  const { code, state, error: oauthError } = req.query
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
 
-  if (!code) return res.status(400).json({ ok: false, message: 'Missing code.' })
+  if (oauthError || !code || !state) {
+    console.error('Microsoft OAuth callback error:', oauthError)
+    return res.redirect(`${frontendUrl}/dashboard?connect_error=outlook`)
+  }
+
+  let userId
+  try {
+    const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf8'))
+    userId = decoded.userId
+  } catch {
+    return res.redirect(`${frontendUrl}/dashboard?connect_error=outlook`)
+  }
+
+  if (!userId) {
+    return res.redirect(`${frontendUrl}/dashboard?connect_error=outlook`)
+  }
 
   try {
     const tokenResp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
@@ -55,14 +71,14 @@ router.post('/microsoft/exchange', authMiddleware, async (req, res) => {
         client_secret: process.env.MICROSOFT_CLIENT_SECRET,
         grant_type: 'authorization_code',
         code,
-        redirect_uri: MICROSOFT_FRONTEND_REDIRECT,
+        redirect_uri: MICROSOFT_BACKEND_REDIRECT,
       }).toString(),
     })
 
     if (!tokenResp.ok) {
       const errText = await tokenResp.text()
       console.error('Microsoft token exchange failed:', errText)
-      return res.status(400).json({ ok: false, message: 'Token exchange failed.' })
+      return res.redirect(`${frontendUrl}/dashboard?connect_error=outlook`)
     }
 
     const tokens = await tokenResp.json()
@@ -86,13 +102,13 @@ router.post('/microsoft/exchange', authMiddleware, async (req, res) => {
 
     if (upsertError) {
       console.error('Failed to upsert Outlook account:', upsertError)
-      return res.status(500).json({ ok: false, message: 'Failed to save account.' })
+      return res.redirect(`${frontendUrl}/dashboard?connect_error=outlook`)
     }
 
-    return res.json({ ok: true, email })
+    return res.redirect(`${frontendUrl}/dashboard?connected=outlook`)
   } catch (err) {
-    console.error('Microsoft exchange error:', err)
-    return res.status(500).json({ ok: false, message: 'Internal error.' })
+    console.error('Microsoft callback error:', err)
+    return res.redirect(`${frontendUrl}/dashboard?connect_error=outlook`)
   }
 })
 
