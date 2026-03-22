@@ -20,6 +20,7 @@ export async function startGoogleConnect() {
   localStorage.setItem('mailpilot.oauth_provider_hint', 'gmail')
   localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'gmail')
   localStorage.setItem(CONNECTING_PROVIDER_STARTED_AT_KEY, String(Date.now()))
+  localStorage.setItem('mailpilot.last_login_provider', 'gmail')
   if (typeof window !== 'undefined') {
     window.sessionStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'google')
   }
@@ -52,6 +53,7 @@ export async function startMicrosoftConnect(userInitiated = false) {
   localStorage.setItem('mailpilot.oauth_provider_hint', 'outlook')
   localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
   localStorage.setItem(CONNECTING_PROVIDER_STARTED_AT_KEY, String(Date.now()))
+  localStorage.setItem('mailpilot.last_login_provider', 'outlook')
   if (typeof window !== 'undefined') {
     window.sessionStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
   }

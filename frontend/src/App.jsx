@@ -11,6 +11,7 @@ const CONNECTING_PROVIDER_KEY = 'connecting_provider'
 const CONNECTING_PROVIDER_STARTED_AT_KEY = 'connecting_provider_started_at'
 const PROVIDER_TOKEN_STATUS_KEY = 'mailpilot.provider_token_status'
 const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
+const LAST_LOGIN_PROVIDER_KEY = 'mailpilot.last_login_provider'
 const CONNECTING_PROVIDER_MAX_AGE_MS = 15 * 60 * 1000
 
 function getPageFromPath(pathname) {
@@ -127,7 +128,19 @@ export default function App() {
       return
     }
 
-    const normalizedRows = (Array.isArray(data) ? data : [])
+    let rows = Array.isArray(data) ? data : []
+
+    // If the user just completed a fresh OAuth login, only show that provider.
+    // This prevents a previously-connected second provider from auto-connecting.
+    // The flag is cleared when the user explicitly connects a second account.
+    const lastLoginProvider = localStorage.getItem(LAST_LOGIN_PROVIDER_KEY)
+    if (lastLoginProvider) {
+      rows = rows.filter(
+        (row) => normalizeConnectedProvider(row?.provider) === lastLoginProvider
+      )
+    }
+
+    const normalizedRows = rows
       .map((row) => {
         const provider = normalizeConnectedProvider(row?.provider)
         if (!provider) return null
@@ -490,7 +503,9 @@ export default function App() {
     }
 
     if (connected) {
-      // Google OAuth backend callback already stored the token — just refresh rows
+      // Google OAuth backend callback already stored the token — just refresh rows.
+      // Clear the login-provider lock so both accounts show now that a second is connected.
+      localStorage.removeItem(LAST_LOGIN_PROVIDER_KEY)
       const supabase = getSupabase()
       if (supabase) refreshConnectedAccountRows(supabase, authSession.user?.id)
       return
@@ -505,6 +520,8 @@ export default function App() {
       } catch { /* ignore */ }
 
       if (provider === 'outlook') {
+        // Clear the login-provider lock so both accounts show now that a second is connected.
+        localStorage.removeItem(LAST_LOGIN_PROVIDER_KEY)
         fetch(`${BACKEND_URL}/api/auth/microsoft/exchange`, {
           method: 'POST',
           headers: {
