@@ -292,6 +292,14 @@ export default function App() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'TOKEN_REFRESHED') {
+        if (session?.access_token) {
+          setAuthSession(session)
+          setStoredToken(session.access_token)
+        }
+        return
+      }
+
       if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
         sessionStorage.setItem('mailpilot.session_active', 'true')
         setAuthSession(session ?? null)
@@ -464,6 +472,25 @@ export default function App() {
 
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  // When the tab regains focus, check if the Supabase session is still valid
+  // and update the stored token if it was silently refreshed in the background.
+  useEffect(() => {
+    const supabase = getSupabase()
+    if (!supabase) return
+
+    async function handleFocus() {
+      const { data } = await supabase.auth.getSession()
+      const session = data?.session
+      if (session?.access_token) {
+        setAuthSession(session)
+        setStoredToken(session.access_token)
+      }
+    }
+
+    window.addEventListener('focus', handleFocus)
+    return () => window.removeEventListener('focus', handleFocus)
   }, [])
 
   useEffect(() => {

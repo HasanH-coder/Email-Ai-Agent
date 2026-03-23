@@ -14,6 +14,8 @@ export function getSupabase() {
     cachedClient = createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
         flowType: 'pkce',
+        autoRefreshToken: true,
+        persistSession: true,
       },
     })
   }
