@@ -1620,6 +1620,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [useSignature, setUseSignature] = useState(true)
   const [connectedAccounts, setConnectedAccounts] = useState({ gmail: false, outlook: false })
   const [connectedEmails, setConnectedEmails] = useState({ gmail: '', outlook: '' })
+  const [reconnectRequiredProviders, setReconnectRequiredProviders] = useState({ gmail: false, outlook: false })
   const [fetchedConnectedAccountRows, setFetchedConnectedAccountRows] = useState([])
   const [accountsLoading, setAccountsLoading] = useState(true)
 
@@ -1681,6 +1682,27 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return data?.session?.access_token || null
   }, [])
 
+  const markProviderReconnectRequired = useCallback((provider, message = null) => {
+    console.warn(`[${provider}] reconnect required in frontend`)
+    setReconnectRequiredProviders((prev) => ({ ...prev, [provider]: true }))
+    setConnectActionError(message || `${provider === 'gmail' ? 'Gmail' : 'Outlook'} account needs reconnection.`)
+  }, [])
+
+  const clearProviderReconnectRequired = useCallback((provider) => {
+    setReconnectRequiredProviders((prev) => ({ ...prev, [provider]: false }))
+  }, [])
+
+  const getProviderErrorMessage = useCallback((provider, responseData, fallbackMessage) => {
+    if (responseData?.reconnectRequired) {
+      markProviderReconnectRequired(
+        provider,
+        responseData?.message || `${provider === 'gmail' ? 'Gmail' : 'Outlook'} account needs reconnection.`
+      )
+    }
+
+    return responseData?.gmail_error || responseData?.graph_error || responseData?.message || fallbackMessage
+  }, [markProviderReconnectRequired])
+
   const createGmailDraft = useCallback(async ({ to, subject, body }) => {
     const token = await getGoogleProviderToken()
     if (!token) {
@@ -1698,11 +1720,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const responseData = await response.json()
 
     if (!response.ok) {
-      throw new Error(responseData.gmail_error || responseData.message || 'Failed to create Gmail draft.')
+      throw new Error(getProviderErrorMessage('gmail', responseData, 'Failed to create Gmail draft.'))
     }
 
     return responseData
-  }, [getGoogleProviderToken])
+  }, [getGoogleProviderToken, getProviderErrorMessage])
 
   const updateGmailDraft = useCallback(async (draftId, { to, subject, body }) => {
     const token = await getGoogleProviderToken()
@@ -1721,11 +1743,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const responseData = await response.json()
 
     if (!response.ok) {
-      throw new Error(responseData.gmail_error || responseData.message || 'Failed to update Gmail draft.')
+      throw new Error(getProviderErrorMessage('gmail', responseData, 'Failed to update Gmail draft.'))
     }
 
     return responseData
-  }, [getGoogleProviderToken])
+  }, [getGoogleProviderToken, getProviderErrorMessage])
 
   const sendGmailDraft = useCallback(async (draftId) => {
     const token = await getGoogleProviderToken()
@@ -1743,11 +1765,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const responseData = await response.json()
 
     if (!response.ok) {
-      throw new Error(responseData.gmail_error || responseData.message || 'Failed to send Gmail draft.')
+      throw new Error(getProviderErrorMessage('gmail', responseData, 'Failed to send Gmail draft.'))
     }
 
     return responseData
-  }, [getGoogleProviderToken])
+  }, [getGoogleProviderToken, getProviderErrorMessage])
 
   const deleteGmailDraft = useCallback(async (draftId) => {
     const token = await getGoogleProviderToken()
@@ -1764,11 +1786,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const responseData = await response.json()
 
     if (!response.ok) {
-      throw new Error(responseData.gmail_error || responseData.message || 'Failed to delete Gmail draft.')
+      throw new Error(getProviderErrorMessage('gmail', responseData, 'Failed to delete Gmail draft.'))
     }
 
     return responseData
-  }, [getGoogleProviderToken])
+  }, [getGoogleProviderToken, getProviderErrorMessage])
 
   const fetchGmailEmailDetail = useCallback(async (emailId) => {
     if (!emailId || gmailDetailLoadRef.current.has(emailId)) return
@@ -1790,9 +1812,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
       if (!response.ok) {
         console.error('Failed to load Gmail email detail:', responseData)
+        if (responseData?.reconnectRequired) {
+          markProviderReconnectRequired('gmail', responseData.message || 'Gmail account needs reconnection.')
+        }
         return
       }
 
+      clearProviderReconnectRequired('gmail')
       const normalizedEmail = normalizeGmailEmail(responseData, 0)
       setGmailEmails((prev) => mergeEmailsById(prev, [normalizedEmail]))
     } catch (error) {
@@ -1801,7 +1827,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       gmailDetailLoadRef.current.delete(emailId)
       setGmailDetailLoadingId((currentId) => (currentId === emailId ? null : currentId))
     }
-  }, [getGoogleProviderToken])
+  }, [clearProviderReconnectRequired, getGoogleProviderToken, markProviderReconnectRequired])
 
   const fetchGmailEmailPage = useCallback(async (token, pageToken = null) => {
     const params = new URLSearchParams({ maxResults: '25' })
@@ -1817,11 +1843,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const responseData = await response.json()
 
     if (!response.ok) {
-      throw new Error(responseData.gmail_error || responseData.message || 'Failed to load Gmail emails.')
+      throw new Error(getProviderErrorMessage('gmail', responseData, 'Failed to load Gmail emails.'))
     }
 
     return responseData
-  }, [])
+  }, [getProviderErrorMessage])
 
   const loadGmailEmails = useCallback(async ({ pageToken = null, append = false, silent = false } = {}) => {
     if (gmailPageLoadRef.current) return
@@ -1864,6 +1890,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       const normalizedEmails = newEmails.map(normalizeGmailEmail)
       const nextToken = responseData.nextPageToken || null
 
+      clearProviderReconnectRequired('gmail')
       loadedAnyPage = true
       lastKnownNextPageToken = nextToken
 
@@ -1896,7 +1923,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       setGmailLoading(false)
       setGmailLoadingMore(false)
     }
-  }, [connectedAccounts.gmail, fetchGmailEmailPage, getGoogleProviderToken])
+  }, [clearProviderReconnectRequired, connectedAccounts.gmail, fetchGmailEmailPage, getGoogleProviderToken])
 
   const markGmailEmailStarState = useCallback(async (emailId, starred) => {
     const token = await getGoogleProviderToken()
@@ -1914,14 +1941,15 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       const responseData = await response.json()
 
       if (!response.ok) {
-        throw new Error(responseData.gmail_error || responseData.message || 'Failed to sync Gmail star state.')
+        throw new Error(getProviderErrorMessage('gmail', responseData, 'Failed to sync Gmail star state.'))
       }
+      clearProviderReconnectRequired('gmail')
     } catch (error) {
       console.error('Failed to sync Gmail star state:', error)
       // Revert optimistic update on failure
       setGmailEmails((prev) => prev.map((em) => (em.id === emailId ? { ...em, starred: !starred } : em)))
     }
-  }, [getGoogleProviderToken])
+  }, [clearProviderReconnectRequired, getGoogleProviderToken, getProviderErrorMessage])
 
   const markGmailEmailReadState = useCallback(async (emailId, read) => {
     const token = await getGoogleProviderToken()
@@ -1939,16 +1967,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       const responseData = await response.json()
 
       if (!response.ok) {
-        if (responseData?.reconnectRequired) {
-          setConnectActionError('Gmail read sync needs new permissions. Disconnect and reconnect your Google account.')
-        }
-        throw new Error(responseData.gmail_error || responseData.message || 'Failed to sync Gmail read state.')
+        throw new Error(getProviderErrorMessage('gmail', responseData, 'Failed to sync Gmail read state.'))
       }
+      clearProviderReconnectRequired('gmail')
     } catch (error) {
       console.error('Failed to sync Gmail read state:', error)
       void loadGmailEmails({ silent: true })
     }
-  }, [getGoogleProviderToken, loadGmailEmails])
+  }, [clearProviderReconnectRequired, getGoogleProviderToken, getProviderErrorMessage, loadGmailEmails])
 
   const getMicrosoftSupabaseToken = useCallback(async () => {
     const supabase = getSupabase()
@@ -2003,9 +2029,9 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       body: JSON.stringify({ to, subject, body }),
     })
     const responseData = await response.json()
-    if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to create Outlook draft.')
+    if (!response.ok) throw new Error(getProviderErrorMessage('outlook', responseData, 'Failed to create Outlook draft.'))
     return responseData
-  }, [getMicrosoftSupabaseToken])
+  }, [getMicrosoftSupabaseToken, getProviderErrorMessage])
 
   const updateOutlookDraft = useCallback(async (draftId, { to, subject, body }) => {
     const token = await getMicrosoftSupabaseToken()
@@ -2017,9 +2043,9 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       body: JSON.stringify({ to, subject, body }),
     })
     const responseData = await response.json()
-    if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to update Outlook draft.')
+    if (!response.ok) throw new Error(getProviderErrorMessage('outlook', responseData, 'Failed to update Outlook draft.'))
     return responseData
-  }, [getMicrosoftSupabaseToken])
+  }, [getMicrosoftSupabaseToken, getProviderErrorMessage])
 
   const sendOutlookDraft = useCallback(async (draftId) => {
     const token = await getMicrosoftSupabaseToken()
@@ -2030,9 +2056,9 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       headers: { Authorization: `Bearer ${token}` },
     })
     const responseData = await response.json()
-    if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to send Outlook draft.')
+    if (!response.ok) throw new Error(getProviderErrorMessage('outlook', responseData, 'Failed to send Outlook draft.'))
     return responseData
-  }, [getMicrosoftSupabaseToken])
+  }, [getMicrosoftSupabaseToken, getProviderErrorMessage])
 
   const deleteOutlookDraft = useCallback(async (draftId) => {
     const token = await getMicrosoftSupabaseToken()
@@ -2043,9 +2069,9 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       headers: { Authorization: `Bearer ${token}` },
     })
     const responseData = await response.json()
-    if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to delete Outlook draft.')
+    if (!response.ok) throw new Error(getProviderErrorMessage('outlook', responseData, 'Failed to delete Outlook draft.'))
     return responseData
-  }, [getMicrosoftSupabaseToken])
+  }, [getMicrosoftSupabaseToken, getProviderErrorMessage])
 
   // conversationId -> email[] (ASC order, full conversation messages)
   const [outlookConversationMessages, setOutlookConversationMessages] = useState(new Map())
@@ -2070,10 +2096,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       const data = await response.json()
       if (!response.ok) {
         console.error('Conversation fetch error:', data)
+        if (data?.reconnectRequired) {
+          markProviderReconnectRequired('outlook', data.message || 'Outlook account needs reconnection.')
+        }
         setFailedConversationIds((prev) => new Set([...prev, conversationId]))
         return
       }
 
+      clearProviderReconnectRequired('outlook')
       const messages = Array.isArray(data.messages) ? data.messages.map(normalizeOutlookEmail) : []
       setOutlookConversationMessages((prev) => new Map([...prev, [conversationId, messages]]))
       setOutlookEmails((prev) => mergeEmailsById(prev, messages))
@@ -2087,7 +2117,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         return next
       })
     }
-  }, [getMicrosoftSupabaseToken])
+  }, [clearProviderReconnectRequired, getMicrosoftSupabaseToken, markProviderReconnectRequired])
 
   const loadOutlookEmails = useCallback(async ({ skipToken = null, append = false, silent = false } = {}) => {
     if (outlookPageLoadRef.current) return
@@ -2129,6 +2159,9 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
       if (!response.ok) {
         console.error('Failed to load Outlook emails:', responseData)
+        if (responseData?.reconnectRequired) {
+          markProviderReconnectRequired('outlook', responseData.message || 'Outlook account needs reconnection.')
+        }
         if (!append && !silent) {
           setOutlookEmails([])
           setOutlookInboxLoaded(false)
@@ -2136,6 +2169,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         return
       }
 
+      clearProviderReconnectRequired('outlook')
       const newEmails = Array.isArray(responseData.emails) ? responseData.emails : []
       const normalizedEmails = newEmails.map(normalizeOutlookEmail)
       const nextSkipToken = responseData.nextSkipToken || null
@@ -2157,7 +2191,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       outlookPageLoadRef.current = false
       setOutlookLoading(false)
     }
-  }, [connectedAccounts.outlook, getMicrosoftSupabaseToken])
+  }, [clearProviderReconnectRequired, connectedAccounts.outlook, getMicrosoftSupabaseToken, markProviderReconnectRequired])
 
   const fetchOutlookEmailDetail = useCallback(async (emailId) => {
     if (!emailId || outlookDetailLoadRef.current.has(emailId)) return
@@ -2176,9 +2210,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
       if (!response.ok) {
         console.error('Failed to load Outlook email detail:', responseData)
+        if (responseData?.reconnectRequired) {
+          markProviderReconnectRequired('outlook', responseData.message || 'Outlook account needs reconnection.')
+        }
         return
       }
 
+      clearProviderReconnectRequired('outlook')
       const normalizedEmail = normalizeOutlookEmail(responseData)
       setOutlookEmails((prev) => mergeEmailsById(prev, [normalizedEmail]))
     } catch (error) {
@@ -2187,7 +2225,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       outlookDetailLoadRef.current.delete(emailId)
       setOutlookDetailLoadingId((currentId) => (currentId === emailId ? null : currentId))
     }
-  }, [getMicrosoftSupabaseToken])
+  }, [clearProviderReconnectRequired, getMicrosoftSupabaseToken, markProviderReconnectRequired])
 
   const fetchSentEmailDetail = useCallback(async (emailId, provider) => {
     if (!emailId) return null
@@ -2230,13 +2268,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       const responseData = await response.json()
 
       if (!response.ok) {
-        throw new Error(responseData.message || 'Failed to sync Outlook read state.')
+        throw new Error(getProviderErrorMessage('outlook', responseData, 'Failed to sync Outlook read state.'))
       }
+      clearProviderReconnectRequired('outlook')
     } catch (error) {
       console.error('Failed to sync Outlook read state:', error)
       void loadOutlookEmails({ silent: true })
     }
-  }, [getMicrosoftSupabaseToken, loadOutlookEmails])
+  }, [clearProviderReconnectRequired, getMicrosoftSupabaseToken, getProviderErrorMessage, loadOutlookEmails])
 
   useEffect(() => {
     const supabase = getSupabase()
@@ -2375,10 +2414,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
         if (!response.ok) {
           console.error('Failed to load Gmail sent emails:', responseData)
+          if (responseData?.reconnectRequired) {
+            markProviderReconnectRequired('gmail', responseData.message || 'Gmail account needs reconnection.')
+          }
           setGmailSentEmails([])
           return
         }
 
+        clearProviderReconnectRequired('gmail')
         setGmailSentEmails(
           Array.isArray(responseData.emails) ? responseData.emails.map(normalizeGmailSentEmail) : []
         )
@@ -2393,7 +2436,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return () => {
       cancelled = true
     }
-  }, [connectedAccounts.gmail, getGoogleProviderToken])
+  }, [clearProviderReconnectRequired, connectedAccounts.gmail, getGoogleProviderToken, markProviderReconnectRequired])
 
   useEffect(() => {
     let cancelled = false
@@ -2421,10 +2464,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
         if (!response.ok) {
           console.error('Failed to load Gmail drafts:', responseData)
+          if (responseData?.reconnectRequired) {
+            markProviderReconnectRequired('gmail', responseData.message || 'Gmail account needs reconnection.')
+          }
           setGmailDrafts([])
           return
         }
 
+        clearProviderReconnectRequired('gmail')
         setGmailDrafts(
           Array.isArray(responseData.drafts) ? responseData.drafts.map(normalizeGmailDraft) : []
         )
@@ -2439,7 +2486,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return () => {
       cancelled = true
     }
-  }, [connectedAccounts.gmail, getGoogleProviderToken])
+  }, [clearProviderReconnectRequired, connectedAccounts.gmail, getGoogleProviderToken, markProviderReconnectRequired])
 
   useEffect(() => {
     let cancelled = false
@@ -2465,10 +2512,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
         if (!response.ok) {
           console.error('Failed to load Outlook sent emails:', responseData)
+          if (responseData?.reconnectRequired) {
+            markProviderReconnectRequired('outlook', responseData.message || 'Outlook account needs reconnection.')
+          }
           setOutlookSentEmails([])
           return
         }
 
+        clearProviderReconnectRequired('outlook')
         setOutlookSentEmails(
           Array.isArray(responseData.emails) ? responseData.emails.map(normalizeOutlookSentEmail) : []
         )
@@ -2483,7 +2534,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return () => {
       cancelled = true
     }
-  }, [connectedAccounts.outlook, getMicrosoftSupabaseToken])
+  }, [clearProviderReconnectRequired, connectedAccounts.outlook, getMicrosoftSupabaseToken, markProviderReconnectRequired])
 
   useEffect(() => {
     let cancelled = false
@@ -2509,10 +2560,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
         if (!response.ok) {
           console.error('Failed to load Outlook drafts:', responseData)
+          if (responseData?.reconnectRequired) {
+            markProviderReconnectRequired('outlook', responseData.message || 'Outlook account needs reconnection.')
+          }
           setOutlookDrafts([])
           return
         }
 
+        clearProviderReconnectRequired('outlook')
         setOutlookDrafts(
           Array.isArray(responseData.drafts) ? responseData.drafts.map(normalizeOutlookDraft) : []
         )
@@ -2527,7 +2582,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return () => {
       cancelled = true
     }
-  }, [connectedAccounts.outlook, getMicrosoftSupabaseToken])
+  }, [clearProviderReconnectRequired, connectedAccounts.outlook, getMicrosoftSupabaseToken, markProviderReconnectRequired])
 
   useEffect(() => {
     const { nextConnectedAccounts, nextConnectedEmails } = getConnectedAccountState(effectiveConnectedAccountRows)
@@ -2729,6 +2784,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   function handleConnect(provider, email) {
     writeProviderTokenStatus(provider, true)
+    clearProviderReconnectRequired(provider)
+    setConnectActionError('')
     setConnectedAccounts((prev) => ({ ...prev, [provider]: true }))
     setConnectedEmails((prev) => ({ ...prev, [provider]: email }))
     if (connectModal.fromInbox) {
@@ -2741,6 +2798,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }
 
   async function handleConnectStart(provider) {
+    clearProviderReconnectRequired(provider)
     setConnectActionError('')
     try {
       const supabase = getSupabase()
@@ -2769,6 +2827,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   function handleDisconnect(provider) {
     writeProviderTokenStatus(provider, false)
+    clearProviderReconnectRequired(provider)
     setConnectedAccounts((prev) => ({ ...prev, [provider]: false }))
     setConnectedEmails((prev) => ({ ...prev, [provider]: '' }))
     if (activeProvider === provider) {
@@ -2873,7 +2932,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         responseData = await response.json()
 
         if (!response.ok) {
-          throw new Error(responseData.gmail_error || responseData.message || 'Failed to send Gmail email.')
+          throw new Error(getProviderErrorMessage('gmail', responseData, 'Failed to send Gmail email.'))
         }
       }
 
@@ -2910,7 +2969,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           }),
         })
         const responseData = await response.json()
-        if (!response.ok) throw new Error(responseData.graph_error || responseData.message || 'Failed to send Outlook email.')
+        if (!response.ok) throw new Error(getProviderErrorMessage('outlook', responseData, 'Failed to send Outlook email.'))
       }
 
       setOutlookSentEmails((prev) => [sentEmail, ...prev])
@@ -3431,6 +3490,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               setUseSignature={setUseSignature}
               connectedAccounts={connectedAccounts}
               connectedEmails={connectedEmails}
+              reconnectRequiredProviders={reconnectRequiredProviders}
               onConnectRequest={handleConnectStart}
               onDisconnect={(provider) => setDisconnectModal({ open: true, provider })}
               connectActionError={connectActionError}
@@ -4737,7 +4797,7 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onS
 
 
 // --- Settings Page ---
-function SettingsPage({ darkMode, setDarkMode, signature, setSignature, useSignature, setUseSignature, connectedAccounts, connectedEmails, onConnectRequest, onDisconnect, connectActionError }) {
+function SettingsPage({ darkMode, setDarkMode, signature, setSignature, useSignature, setUseSignature, connectedAccounts, connectedEmails, reconnectRequiredProviders, onConnectRequest, onDisconnect, connectActionError }) {
   return (
     <div className="h-full overflow-y-auto bg-white">
       <div className="max-w-2xl mx-auto px-6 py-8">
@@ -4833,20 +4893,26 @@ function SettingsPage({ darkMode, setDarkMode, signature, setSignature, useSigna
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                {connectedAccounts.gmail && (
+                {reconnectRequiredProviders?.gmail ? (
+                  <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-2.5 py-0.5 rounded-full">
+                    Reconnect required
+                  </span>
+                ) : connectedAccounts.gmail ? (
                   <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-0.5 rounded-full">
                     Connected
                   </span>
-                )}
+                ) : null}
                 <button
-                  onClick={() => connectedAccounts.gmail ? onDisconnect('gmail') : onConnectRequest('gmail')}
+                  onClick={() => reconnectRequiredProviders?.gmail ? onConnectRequest('gmail') : connectedAccounts.gmail ? onDisconnect('gmail') : onConnectRequest('gmail')}
                   className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors cursor-pointer ${
-                    connectedAccounts.gmail
+                    reconnectRequiredProviders?.gmail
+                      ? 'text-white bg-indigo-600 hover:bg-indigo-700'
+                      : connectedAccounts.gmail
                       ? 'text-red-600 bg-red-50 hover:bg-red-100'
                       : 'text-white bg-indigo-600 hover:bg-indigo-700'
                   }`}
                 >
-                  {connectedAccounts.gmail ? 'Disconnect' : 'Connect'}
+                  {reconnectRequiredProviders?.gmail ? 'Reconnect' : connectedAccounts.gmail ? 'Disconnect' : 'Connect'}
                 </button>
               </div>
             </div>
@@ -4869,20 +4935,26 @@ function SettingsPage({ darkMode, setDarkMode, signature, setSignature, useSigna
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                {connectedAccounts.outlook && (
+                {reconnectRequiredProviders?.outlook ? (
+                  <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-2.5 py-0.5 rounded-full">
+                    Reconnect required
+                  </span>
+                ) : connectedAccounts.outlook ? (
                   <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-0.5 rounded-full">
                     Connected
                   </span>
-                )}
+                ) : null}
                 <button
-                  onClick={() => connectedAccounts.outlook ? onDisconnect('outlook') : onConnectRequest('outlook')}
+                  onClick={() => reconnectRequiredProviders?.outlook ? onConnectRequest('outlook') : connectedAccounts.outlook ? onDisconnect('outlook') : onConnectRequest('outlook')}
                   className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors cursor-pointer ${
-                    connectedAccounts.outlook
+                    reconnectRequiredProviders?.outlook
+                      ? 'text-white bg-indigo-600 hover:bg-indigo-700'
+                      : connectedAccounts.outlook
                       ? 'text-red-600 bg-red-50 hover:bg-red-100'
                       : 'text-white bg-indigo-600 hover:bg-indigo-700'
                   }`}
                 >
-                  {connectedAccounts.outlook ? 'Disconnect' : 'Connect'}
+                  {reconnectRequiredProviders?.outlook ? 'Reconnect' : connectedAccounts.outlook ? 'Disconnect' : 'Connect'}
                 </button>
               </div>
             </div>

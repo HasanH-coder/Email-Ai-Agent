@@ -6,6 +6,167 @@ const {
 } = require('../utils/connectedAccounts')
 
 const router = express.Router()
+const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000
+const PROVIDER_API_MAX_RETRIES = 2
+const PROVIDER_API_BASE_BACKOFF_MS = 250
+const PROVIDER_API_TIMEOUT_MS = 15000
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isTokenNearExpiry(tokenExpiresAt, bufferMs = TOKEN_REFRESH_BUFFER_MS) {
+  if (!tokenExpiresAt) return false
+  const expiresAtMs = new Date(tokenExpiresAt).getTime()
+  if (!Number.isFinite(expiresAtMs)) return false
+  return expiresAtMs - Date.now() <= bufferMs
+}
+
+function createProviderApiError(provider, statusCode, providerErrorText, message) {
+  const error = new Error(message)
+  error.statusCode = statusCode
+  if (provider === 'gmail') {
+    error.gmailError = providerErrorText
+  } else {
+    error.graphError = providerErrorText
+  }
+  return error
+}
+
+function isTemporaryProviderStatus(statusCode) {
+  return statusCode === 408 || statusCode === 429 || statusCode >= 500
+}
+
+function isTemporaryProviderError(error) {
+  if (!error) return false
+  if (isTemporaryProviderStatus(error.statusCode)) return true
+  if (error.name === 'AbortError') return true
+  if (error.code === 'ETIMEDOUT' || error.code === 'ECONNRESET' || error.code === 'UND_ERR_CONNECT_TIMEOUT') {
+    return true
+  }
+  return error instanceof TypeError
+}
+
+function isReconnectRequiredRefreshFailure(statusCode, errorText = '') {
+  if (statusCode !== 400 && statusCode !== 401) return false
+  const normalized = String(errorText).toLowerCase()
+  return (
+    normalized.includes('invalid_grant') ||
+    normalized.includes('invalid_token') ||
+    normalized.includes('revoked') ||
+    normalized.includes('expired') ||
+    normalized.includes('interaction_required') ||
+    normalized.includes('consent_required')
+  )
+}
+
+function createReconnectRequiredError(provider, providerErrorText = '') {
+  const error = new Error('Account needs reconnection')
+  error.statusCode = 401
+  error.reconnectRequired = true
+  error.provider = provider
+  if (provider === 'gmail') {
+    error.gmailError = providerErrorText || 'Account needs reconnection'
+  } else {
+    error.graphError = providerErrorText || 'Account needs reconnection'
+  }
+  return error
+}
+
+function logProviderRetry(provider, requestLabel, attempt, error) {
+  console.warn(`[${provider}] temporary API failure, retrying`, {
+    request: requestLabel,
+    attempt,
+    statusCode: error?.statusCode || null,
+    errorName: error?.name || null,
+    reconnectRequired: Boolean(error?.reconnectRequired),
+  })
+}
+
+function sendProviderError(res, provider, error, message) {
+  const payload = {
+    message: error?.reconnectRequired ? 'Account needs reconnection' : message,
+    reconnectRequired: Boolean(error?.reconnectRequired),
+    provider,
+  }
+
+  if (provider === 'gmail' && error?.gmailError) {
+    payload.gmail_error = error.gmailError
+  }
+  if (provider === 'outlook' && error?.graphError) {
+    payload.graph_error = error.graphError
+  }
+
+  if (error?.reconnectRequired) {
+    console.warn(`[${provider}] account needs reconnection`, {
+      statusCode: error?.statusCode || 401,
+    })
+  }
+
+  return res.status(error?.statusCode || 500).json(payload)
+}
+
+async function performProviderFetch({
+  provider,
+  requestLabel,
+  url,
+  options = {},
+  responseType = 'json',
+}) {
+  for (let attempt = 0; attempt <= PROVIDER_API_MAX_RETRIES; attempt += 1) {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), PROVIDER_API_TIMEOUT_MS)
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        const error = createProviderApiError(
+          provider,
+          response.status,
+          errorText,
+          `${provider} API request failed with status ${response.status}.`
+        )
+
+        if (attempt < PROVIDER_API_MAX_RETRIES && isTemporaryProviderError(error)) {
+          logProviderRetry(provider, requestLabel, attempt + 1, error)
+          await sleep(PROVIDER_API_BASE_BACKOFF_MS * (2 ** attempt))
+          continue
+        }
+
+        throw error
+      }
+
+      if (responseType === 'response') {
+        return response
+      }
+      if (responseType === 'text') {
+        return response.text()
+      }
+      return response.json()
+    } catch (error) {
+      if (attempt < PROVIDER_API_MAX_RETRIES && isTemporaryProviderError(error)) {
+        logProviderRetry(provider, requestLabel, attempt + 1, error)
+        await sleep(PROVIDER_API_BASE_BACKOFF_MS * (2 ** attempt))
+        continue
+      }
+
+      if (error.name === 'AbortError') {
+        throw createProviderApiError(provider, 408, 'Provider API request timed out.', `${provider} API request timed out.`)
+      }
+
+      throw error
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  throw new Error('Unreachable provider fetch retry state.')
+}
 
 function getHeaderValue(headers = [], name) {
   const normalizedName = name.toLowerCase()
@@ -137,41 +298,33 @@ function normalizeGmailMessage(messageData) {
 }
 
 async function fetchGmailJson(url, token) {
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
+  return performProviderFetch({
+    provider: 'gmail',
+    requestLabel: 'gmail.json',
+    url,
+    options: {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
     },
+    responseType: 'json',
   })
-
-  if (!response.ok) {
-    const errorText = await response.text()
-    const error = new Error(`Gmail API request failed with status ${response.status}.`)
-    error.statusCode = response.status
-    error.gmailError = errorText
-    throw error
-  }
-
-  return response.json()
 }
 
 async function fetchGmailResponse(url, token, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(options.headers || {}),
+  return performProviderFetch({
+    provider: 'gmail',
+    requestLabel: 'gmail.response',
+    url,
+    options: {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(options.headers || {}),
+      },
     },
+    responseType: 'response',
   })
-
-  if (!response.ok) {
-    const errorText = await response.text()
-    const error = new Error(`Gmail API request failed with status ${response.status}.`)
-    error.statusCode = response.status
-    error.gmailError = errorText
-    throw error
-  }
-
-  return response
 }
 
 async function fetchGmailMessagesByIds(messageIds, token) {
@@ -250,10 +403,9 @@ function buildRawEmail({ from, to, subject, body, attachments = [] }) {
 }
 
 router.get('/gmail', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -268,8 +420,12 @@ router.get('/gmail', async (req, res, next) => {
       listData = await fetchGmailJson(url, accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { accessToken = freshToken; listData = await fetchGmailJson(url, freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          listData = await fetchGmailJson(url, refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -283,17 +439,16 @@ router.get('/gmail', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail messages.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to fetch Gmail messages.')
     }
     return next(error)
   }
 })
 
 router.get('/gmail/inbox-meta', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -304,9 +459,10 @@ router.get('/gmail/inbox-meta', async (req, res, next) => {
       unreadData = await fetchGmailJson(unreadUrl, accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) {
-          accessToken = freshToken
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
           await fetchGmailJson('https://gmail.googleapis.com/gmail/v1/users/me/labels', accessToken)
           unreadData = await fetchGmailJson(unreadUrl, accessToken)
         } else throw gmailError
@@ -316,17 +472,16 @@ router.get('/gmail/inbox-meta', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail inbox metadata.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to fetch Gmail inbox metadata.')
     }
     return next(error)
   }
 })
 
 router.get('/gmail/sent', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -336,8 +491,12 @@ router.get('/gmail/sent', async (req, res, next) => {
       listData = await fetchGmailJson(url, accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { accessToken = freshToken; listData = await fetchGmailJson(url, freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          listData = await fetchGmailJson(url, refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -347,17 +506,16 @@ router.get('/gmail/sent', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail sent emails.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to fetch Gmail sent emails.')
     }
     return next(error)
   }
 })
 
 router.get('/gmail/drafts', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -367,8 +525,12 @@ router.get('/gmail/drafts', async (req, res, next) => {
       listData = await fetchGmailJson(url, accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { accessToken = freshToken; listData = await fetchGmailJson(url, freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          listData = await fetchGmailJson(url, refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -396,17 +558,16 @@ router.get('/gmail/drafts', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail drafts.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to fetch Gmail drafts.')
     }
     return next(error)
   }
 })
 
 router.post('/gmail/send', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   const to = String(req.body?.to || '').trim()
@@ -427,17 +588,17 @@ router.post('/gmail/send', async (req, res, next) => {
   async function doSend(tok) {
     const userEmail = await fetchGmailProfileEmail(tok)
     const rawEmail = buildRawEmail({ from: userEmail, to, subject, body, attachments })
-    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw: encodeBase64Url(rawEmail) }),
+    return performProviderFetch({
+      provider: 'gmail',
+      requestLabel: 'gmail.send',
+      url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+      options: {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw: encodeBase64Url(rawEmail) }),
+      },
+      responseType: 'json',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error('Failed to send Gmail email.')
-      err.statusCode = response.status; err.gmailError = errorText; throw err
-    }
-    return response.json()
   }
 
   try {
@@ -446,8 +607,11 @@ router.post('/gmail/send', async (req, res, next) => {
       responseData = await doSend(accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { responseData = await doSend(freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          responseData = await doSend(refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -455,17 +619,16 @@ router.post('/gmail/send', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL SEND ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to send Gmail email.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to send Gmail email.')
     }
     return next(error)
   }
 })
 
 router.post('/gmail/drafts', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   const to = String(req.body?.to || '').trim()
@@ -475,17 +638,17 @@ router.post('/gmail/drafts', async (req, res, next) => {
   async function doCreate(tok) {
     const userEmail = await fetchGmailProfileEmail(tok)
     const raw = encodeBase64Url(buildRawEmail({ from: userEmail, to, subject, body }))
-    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: { raw } }),
+    return performProviderFetch({
+      provider: 'gmail',
+      requestLabel: 'gmail.createDraft',
+      url: 'https://gmail.googleapis.com/gmail/v1/users/me/drafts',
+      options: {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: { raw } }),
+      },
+      responseType: 'json',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error('Failed to create Gmail draft.')
-      err.statusCode = response.status; err.gmailError = errorText; throw err
-    }
-    return response.json()
   }
 
   try {
@@ -494,8 +657,11 @@ router.post('/gmail/drafts', async (req, res, next) => {
       responseData = await doCreate(accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { responseData = await doCreate(freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          responseData = await doCreate(refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -503,17 +669,16 @@ router.post('/gmail/drafts', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL DRAFT CREATE ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to create Gmail draft.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to create Gmail draft.')
     }
     return next(error)
   }
 })
 
 router.put('/gmail/drafts/:id', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   const to = String(req.body?.to || '').trim()
@@ -524,17 +689,17 @@ router.put('/gmail/drafts/:id', async (req, res, next) => {
   async function doUpdate(tok) {
     const userEmail = await fetchGmailProfileEmail(tok)
     const raw = encodeBase64Url(buildRawEmail({ from: userEmail, to, subject, body }))
-    const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: draftId, message: { raw } }),
+    return performProviderFetch({
+      provider: 'gmail',
+      requestLabel: 'gmail.updateDraft',
+      url: `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`,
+      options: {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: draftId, message: { raw } }),
+      },
+      responseType: 'json',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error('Failed to update Gmail draft.')
-      err.statusCode = response.status; err.gmailError = errorText; throw err
-    }
-    return response.json()
   }
 
   try {
@@ -543,8 +708,11 @@ router.put('/gmail/drafts/:id', async (req, res, next) => {
       responseData = await doUpdate(accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { responseData = await doUpdate(freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          responseData = await doUpdate(refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -552,31 +720,30 @@ router.put('/gmail/drafts/:id', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL DRAFT UPDATE ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to update Gmail draft.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to update Gmail draft.')
     }
     return next(error)
   }
 })
 
 router.post('/gmail/drafts/:id/send', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   async function doSendDraft(tok) {
-    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: req.params.id }),
+    return performProviderFetch({
+      provider: 'gmail',
+      requestLabel: 'gmail.sendDraft',
+      url: 'https://gmail.googleapis.com/gmail/v1/users/me/drafts/send',
+      options: {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: req.params.id }),
+      },
+      responseType: 'json',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error('Failed to send Gmail draft.')
-      err.statusCode = response.status; err.gmailError = errorText; throw err
-    }
-    return response.json()
   }
 
   try {
@@ -585,8 +752,11 @@ router.post('/gmail/drafts/:id/send', async (req, res, next) => {
       responseData = await doSendDraft(accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { responseData = await doSendDraft(freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          responseData = await doSendDraft(refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -594,29 +764,29 @@ router.post('/gmail/drafts/:id/send', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL DRAFT SEND ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to send Gmail draft.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to send Gmail draft.')
     }
     return next(error)
   }
 })
 
 router.delete('/gmail/drafts/:id', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   async function doDelete(tok) {
-    const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${req.params.id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${tok}` },
+    await performProviderFetch({
+      provider: 'gmail',
+      requestLabel: 'gmail.deleteDraft',
+      url: `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${req.params.id}`,
+      options: {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${tok}` },
+      },
+      responseType: 'response',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error('Failed to delete Gmail draft.')
-      err.statusCode = response.status; err.gmailError = errorText; throw err
-    }
   }
 
   try {
@@ -624,8 +794,11 @@ router.delete('/gmail/drafts/:id', async (req, res, next) => {
       await doDelete(accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { await doDelete(freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          await doDelete(refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -633,17 +806,16 @@ router.delete('/gmail/drafts/:id', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL DRAFT DELETE ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to delete Gmail draft.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to delete Gmail draft.')
     }
     return next(error)
   }
 })
 
 router.get('/gmail/:id', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -653,8 +825,12 @@ router.get('/gmail/:id', async (req, res, next) => {
       messageData = await fetchGmailJson(url, accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { accessToken = freshToken; messageData = await fetchGmailJson(url, freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          messageData = await fetchGmailJson(url, refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -670,17 +846,16 @@ router.get('/gmail/:id', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail message.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to fetch Gmail message.')
     }
     return next(error)
   }
 })
 
 router.patch('/gmail/:id/read', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   const read = Boolean(req.body?.read)
@@ -693,8 +868,11 @@ router.patch('/gmail/:id/read', async (req, res, next) => {
       await fetchGmailResponse(url, accessToken, opts)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { await fetchGmailResponse(url, freshToken, opts) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          await fetchGmailResponse(url, refreshed.accessToken, opts)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -702,21 +880,16 @@ router.patch('/gmail/:id/read', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({
-        message: 'Failed to update Gmail read state.',
-        gmail_error: error.gmailError,
-        reconnectRequired: error.statusCode === 401 || error.statusCode === 403,
-      })
+      return sendProviderError(res, 'gmail', error, 'Failed to update Gmail read state.')
     }
     return next(error)
   }
 })
 
 router.patch('/gmail/:id/star', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   const starred = Boolean(req.body?.starred)
@@ -729,8 +902,11 @@ router.patch('/gmail/:id/star', async (req, res, next) => {
       await fetchGmailResponse(url, accessToken, opts)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { await fetchGmailResponse(url, freshToken, opts) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          await fetchGmailResponse(url, refreshed.accessToken, opts)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -738,21 +914,16 @@ router.patch('/gmail/:id/star', async (req, res, next) => {
   } catch (error) {
     if (error.gmailError) {
       console.error('GMAIL API ERROR:', error.gmailError)
-      return res.status(error.statusCode || 500).json({
-        message: 'Failed to update Gmail star state.',
-        gmail_error: error.gmailError,
-        reconnectRequired: error.statusCode === 401 || error.statusCode === 403,
-      })
+      return sendProviderError(res, 'gmail', error, 'Failed to update Gmail star state.')
     }
     return next(error)
   }
 })
 
 router.get('/gmail/:id/attachments/:attachmentId', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-  const tokens = await getGmailTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+  const authContext = await getAuthorizedGmailContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -762,8 +933,11 @@ router.get('/gmail/:id/attachments/:attachmentId', async (req, res, next) => {
       data = await fetchGmailJson(url, accessToken)
     } catch (gmailError) {
       if (gmailError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshGoogleToken(userId, refreshToken)
-        if (freshToken) { data = await fetchGmailJson(url, freshToken) }
+        const refreshed = await tryRefreshGoogleToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          data = await fetchGmailJson(url, refreshed.accessToken)
+        }
         else throw gmailError
       } else throw gmailError
     }
@@ -773,7 +947,7 @@ router.get('/gmail/:id/attachments/:attachmentId', async (req, res, next) => {
     return res.send(buffer)
   } catch (error) {
     if (error.gmailError) {
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Gmail attachment.', gmail_error: error.gmailError })
+      return sendProviderError(res, 'gmail', error, 'Failed to fetch Gmail attachment.')
     }
     return next(error)
   }
@@ -807,6 +981,7 @@ async function getGmailTokens(userId) {
       email: data.email || '',
       accessToken: data.provider_access_token,
       refreshToken: data.provider_refresh_token || null,
+      tokenExpiresAt: data.provider_token_expires_at || null,
     }
   } catch (error) {
     console.error('Failed to load Gmail tokens:', error)
@@ -828,9 +1003,22 @@ async function tryRefreshGoogleToken(userId, refreshToken) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString(),
     })
-    if (!response.ok) return null
+    if (!response.ok) {
+      const errorText = await response.text()
+      if (isReconnectRequiredRefreshFailure(response.status, errorText)) {
+        throw createReconnectRequiredError('gmail', errorText)
+      }
+      console.warn('[gmail] token refresh failed', {
+        statusCode: response.status,
+      })
+      return null
+    }
     const data = await response.json()
     if (!data.access_token) return null
+    const tokenExpiresAt =
+      Object.prototype.hasOwnProperty.call(data, 'expires_in') && Number.isFinite(Number(data.expires_in))
+        ? new Date(Date.now() + Number(data.expires_in) * 1000)
+        : undefined
     await updateConnectedAccountTokens({
       codePath: 'emails.gmail.refresh',
       userId,
@@ -839,10 +1027,18 @@ async function tryRefreshGoogleToken(userId, refreshToken) {
       refreshToken: Object.prototype.hasOwnProperty.call(data, 'refresh_token')
         ? data.refresh_token
         : undefined,
+      tokenExpiresAt,
     })
-    return data.access_token
+    return {
+      accessToken: data.access_token,
+      refreshToken: Object.prototype.hasOwnProperty.call(data, 'refresh_token')
+        ? data.refresh_token
+        : refreshToken,
+      tokenExpiresAt: tokenExpiresAt ? tokenExpiresAt.toISOString() : null,
+    }
   } catch (error) {
     console.error('Failed to refresh Gmail token:', error)
+    if (error.reconnectRequired) throw error
     return null
   }
 }
@@ -861,6 +1057,7 @@ async function getOutlookTokens(userId) {
       email: data.email || '',
       accessToken: data.provider_access_token,
       refreshToken: data.provider_refresh_token || null,
+      tokenExpiresAt: data.provider_token_expires_at || null,
     }
   } catch (error) {
     console.error('Failed to load Outlook tokens:', error)
@@ -883,9 +1080,22 @@ async function tryRefreshMicrosoftToken(userId, refreshToken) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString(),
     })
-    if (!response.ok) return null
+    if (!response.ok) {
+      const errorText = await response.text()
+      if (isReconnectRequiredRefreshFailure(response.status, errorText)) {
+        throw createReconnectRequiredError('outlook', errorText)
+      }
+      console.warn('[outlook] token refresh failed', {
+        statusCode: response.status,
+      })
+      return null
+    }
     const data = await response.json()
     if (!data.access_token) return null
+    const tokenExpiresAt =
+      Object.prototype.hasOwnProperty.call(data, 'expires_in') && Number.isFinite(Number(data.expires_in))
+        ? new Date(Date.now() + Number(data.expires_in) * 1000)
+        : undefined
     await updateConnectedAccountTokens({
       codePath: 'emails.outlook.refresh',
       userId,
@@ -894,24 +1104,120 @@ async function tryRefreshMicrosoftToken(userId, refreshToken) {
       refreshToken: Object.prototype.hasOwnProperty.call(data, 'refresh_token')
         ? data.refresh_token
         : undefined,
+      tokenExpiresAt,
     })
-    return data.access_token
+    return {
+      accessToken: data.access_token,
+      refreshToken: Object.prototype.hasOwnProperty.call(data, 'refresh_token')
+        ? data.refresh_token
+        : refreshToken,
+      tokenExpiresAt: tokenExpiresAt ? tokenExpiresAt.toISOString() : null,
+    }
   } catch (error) {
     console.error('Failed to refresh Outlook token:', error)
+    if (error.reconnectRequired) throw error
     return null
   }
 }
 
-async function fetchGraphJson(url, token, extraHeaders = {}) {
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}`, ...extraHeaders } })
-  if (!response.ok) {
-    const errorText = await response.text()
-    const error = new Error(`Microsoft Graph API request failed with status ${response.status}.`)
-    error.statusCode = response.status
-    error.graphError = errorText
+async function getUsableGmailTokens(userId) {
+  const tokens = await getGmailTokens(userId)
+  if (!tokens) return null
+
+  if (tokens.tokenExpiresAt && isTokenNearExpiry(tokens.tokenExpiresAt) && tokens.refreshToken) {
+    console.info('[gmail] access token near expiry, proactively refreshing', {
+      user_id: userId,
+      email: tokens.email || null,
+    })
+    const refreshed = await tryRefreshGoogleToken(userId, tokens.refreshToken)
+    if (refreshed?.accessToken) {
+      return {
+        ...tokens,
+        ...refreshed,
+      }
+    }
+  }
+
+  return tokens
+}
+
+async function getUsableOutlookTokens(userId) {
+  const tokens = await getOutlookTokens(userId)
+  if (!tokens) return null
+
+  if (tokens.tokenExpiresAt && isTokenNearExpiry(tokens.tokenExpiresAt) && tokens.refreshToken) {
+    console.info('[outlook] access token near expiry, proactively refreshing', {
+      user_id: userId,
+      email: tokens.email || null,
+    })
+    const refreshed = await tryRefreshMicrosoftToken(userId, tokens.refreshToken)
+    if (refreshed?.accessToken) {
+      return {
+        ...tokens,
+        ...refreshed,
+      }
+    }
+  }
+
+  return tokens
+}
+
+async function getAuthorizedGmailContext(req, res) {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) {
+    res.status(401).json({ message: 'Invalid authorization.' })
+    return null
+  }
+
+  try {
+    const tokens = await getUsableGmailTokens(userId)
+    if (!tokens) {
+      res.status(401).json({ message: 'Gmail account not connected or token missing.' })
+      return null
+    }
+    return { userId, tokens }
+  } catch (error) {
+    if (error.reconnectRequired) {
+      sendProviderError(res, 'gmail', error, 'Failed to authorize Gmail account.')
+      return null
+    }
     throw error
   }
-  return response.json()
+}
+
+async function getAuthorizedOutlookContext(req, res) {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) {
+    res.status(401).json({ message: 'Invalid authorization.' })
+    return null
+  }
+
+  try {
+    const tokens = await getUsableOutlookTokens(userId)
+    if (!tokens) {
+      res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+      return null
+    }
+    return { userId, tokens }
+  } catch (error) {
+    if (error.reconnectRequired) {
+      sendProviderError(res, 'outlook', error, 'Failed to authorize Outlook account.')
+      return null
+    }
+    throw error
+  }
+}
+
+async function fetchGraphJson(url, token, extraHeaders = {}) {
+  return performProviderFetch({
+    provider: 'outlook',
+    requestLabel: 'outlook.json',
+    url,
+    options: {
+      headers: { Authorization: `Bearer ${token}`, ...extraHeaders },
+    },
+    responseType: 'json',
+  })
 }
 
 function normalizeOutlookMessage(msg) {
@@ -935,12 +1241,9 @@ function normalizeOutlookMessage(msg) {
 }
 
 router.get('/outlook', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
-
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -960,9 +1263,11 @@ router.get('/outlook', async (req, res, next) => {
       data = await fetchGraphJson(url, accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          data = await fetchGraphJson(url, freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          data = await fetchGraphJson(url, refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -985,19 +1290,16 @@ router.get('/outlook', async (req, res, next) => {
   } catch (error) {
     if (error.graphError) {
       console.error('GRAPH API ERROR (inbox):', error.graphError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook messages.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to fetch Outlook messages.')
     }
     return next(error)
   }
 })
 
 router.get('/outlook/sent', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
-
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -1008,9 +1310,11 @@ router.get('/outlook/sent', async (req, res, next) => {
       data = await fetchGraphJson(url, accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          data = await fetchGraphJson(url, freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          data = await fetchGraphJson(url, refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1040,19 +1344,16 @@ router.get('/outlook/sent', async (req, res, next) => {
   } catch (error) {
     if (error.graphError) {
       console.error('GRAPH API ERROR (sent):', error.graphError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook sent emails.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to fetch Outlook sent emails.')
     }
     return next(error)
   }
 })
 
 router.get('/outlook/drafts', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
-
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
   let { accessToken, refreshToken } = tokens
 
   try {
@@ -1063,9 +1364,11 @@ router.get('/outlook/drafts', async (req, res, next) => {
       data = await fetchGraphJson(url, accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          data = await fetchGraphJson(url, freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          data = await fetchGraphJson(url, refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1093,18 +1396,16 @@ router.get('/outlook/drafts', async (req, res, next) => {
   } catch (error) {
     if (error.graphError) {
       console.error('GRAPH API ERROR (drafts):', error.graphError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook drafts.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to fetch Outlook drafts.')
     }
     return next(error)
   }
 })
 
 router.post('/outlook/send', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   const to = String(req.body?.to || '').trim()
   const subject = String(req.body?.subject || '').trim()
@@ -1141,18 +1442,17 @@ router.post('/outlook/send', async (req, res, next) => {
       }))
     }
 
-    const response = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: messagePayload, saveToSentItems: true }),
+    await performProviderFetch({
+      provider: 'outlook',
+      requestLabel: 'outlook.sendMail',
+      url: 'https://graph.microsoft.com/v1.0/me/sendMail',
+      options: {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: messagePayload, saveToSentItems: true }),
+      },
+      responseType: 'response',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error(`Graph sendMail failed: ${response.status}`)
-      err.statusCode = response.status
-      err.graphError = errorText
-      throw err
-    }
   }
 
   try {
@@ -1160,9 +1460,10 @@ router.post('/outlook/send', async (req, res, next) => {
       await doSend(accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          await doSend(freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          await doSend(refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1173,18 +1474,16 @@ router.post('/outlook/send', async (req, res, next) => {
     return res.status(200).json({ success: true })
   } catch (error) {
     if (error.graphError) {
-      return res.status(error.statusCode || 500).json({ message: 'Failed to send Outlook email.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to send Outlook email.')
     }
     return next(error)
   }
 })
 
 router.post('/outlook/drafts', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   const to = String(req.body?.to || '').trim()
   const subject = String(req.body?.subject || '').trim()
@@ -1193,23 +1492,21 @@ router.post('/outlook/drafts', async (req, res, next) => {
   let { accessToken, refreshToken } = tokens
 
   async function createDraft(token) {
-    const response = await fetch('https://graph.microsoft.com/v1.0/me/messages', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        subject: subject || '(No Subject)',
-        body: { contentType: 'Text', content: body },
-        toRecipients: to ? [{ emailAddress: { address: to } }] : [],
-      }),
+    return performProviderFetch({
+      provider: 'outlook',
+      requestLabel: 'outlook.createDraft',
+      url: 'https://graph.microsoft.com/v1.0/me/messages',
+      options: {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject: subject || '(No Subject)',
+          body: { contentType: 'Text', content: body },
+          toRecipients: to ? [{ emailAddress: { address: to } }] : [],
+        }),
+      },
+      responseType: 'json',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error(`Graph POST draft failed: ${response.status}`)
-      err.statusCode = response.status
-      err.graphError = errorText
-      throw err
-    }
-    return response.json()
   }
 
   try {
@@ -1218,9 +1515,10 @@ router.post('/outlook/drafts', async (req, res, next) => {
       data = await createDraft(accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          data = await createDraft(freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          data = await createDraft(refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1231,18 +1529,16 @@ router.post('/outlook/drafts', async (req, res, next) => {
     return res.status(200).json({ success: true, id: data.id })
   } catch (error) {
     if (error.graphError) {
-      return res.status(error.statusCode || 500).json({ message: 'Failed to create Outlook draft.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to create Outlook draft.')
     }
     return next(error)
   }
 })
 
 router.put('/outlook/drafts/:id', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   const to = String(req.body?.to || '').trim()
   const subject = String(req.body?.subject || '').trim()
@@ -1251,23 +1547,21 @@ router.put('/outlook/drafts/:id', async (req, res, next) => {
   let { accessToken, refreshToken } = tokens
 
   async function updateDraft(token) {
-    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        subject: subject || '(No Subject)',
-        body: { contentType: 'Text', content: body },
-        toRecipients: to ? [{ emailAddress: { address: to } }] : [],
-      }),
+    return performProviderFetch({
+      provider: 'outlook',
+      requestLabel: 'outlook.updateDraft',
+      url: `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`,
+      options: {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject: subject || '(No Subject)',
+          body: { contentType: 'Text', content: body },
+          toRecipients: to ? [{ emailAddress: { address: to } }] : [],
+        }),
+      },
+      responseType: 'json',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error(`Graph PATCH draft failed: ${response.status}`)
-      err.statusCode = response.status
-      err.graphError = errorText
-      throw err
-    }
-    return response.json()
   }
 
   try {
@@ -1276,9 +1570,10 @@ router.put('/outlook/drafts/:id', async (req, res, next) => {
       data = await updateDraft(accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          data = await updateDraft(freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          data = await updateDraft(refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1289,33 +1584,30 @@ router.put('/outlook/drafts/:id', async (req, res, next) => {
     return res.status(200).json({ success: true, id: data.id })
   } catch (error) {
     if (error.graphError) {
-      return res.status(error.statusCode || 500).json({ message: 'Failed to update Outlook draft.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to update Outlook draft.')
     }
     return next(error)
   }
 })
 
 router.post('/outlook/drafts/:id/send', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   let { accessToken, refreshToken } = tokens
 
   async function sendDraft(token) {
-    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${req.params.id}/send`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Length': '0' },
+    await performProviderFetch({
+      provider: 'outlook',
+      requestLabel: 'outlook.sendDraft',
+      url: `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}/send`,
+      options: {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Length': '0' },
+      },
+      responseType: 'response',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error(`Graph send draft failed: ${response.status}`)
-      err.statusCode = response.status
-      err.graphError = errorText
-      throw err
-    }
   }
 
   try {
@@ -1323,9 +1615,10 @@ router.post('/outlook/drafts/:id/send', async (req, res, next) => {
       await sendDraft(accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          await sendDraft(freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          await sendDraft(refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1336,33 +1629,30 @@ router.post('/outlook/drafts/:id/send', async (req, res, next) => {
     return res.status(200).json({ success: true })
   } catch (error) {
     if (error.graphError) {
-      return res.status(error.statusCode || 500).json({ message: 'Failed to send Outlook draft.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to send Outlook draft.')
     }
     return next(error)
   }
 })
 
 router.delete('/outlook/drafts/:id', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   let { accessToken, refreshToken } = tokens
 
   async function deleteDraft(token) {
-    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
+    await performProviderFetch({
+      provider: 'outlook',
+      requestLabel: 'outlook.deleteDraft',
+      url: `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`,
+      options: {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      },
+      responseType: 'response',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error(`Graph DELETE draft failed: ${response.status}`)
-      err.statusCode = response.status
-      err.graphError = errorText
-      throw err
-    }
   }
 
   try {
@@ -1370,9 +1660,10 @@ router.delete('/outlook/drafts/:id', async (req, res, next) => {
       await deleteDraft(accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          await deleteDraft(freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          await deleteDraft(refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1383,18 +1674,16 @@ router.delete('/outlook/drafts/:id', async (req, res, next) => {
     return res.status(200).json({ success: true })
   } catch (error) {
     if (error.graphError) {
-      return res.status(error.statusCode || 500).json({ message: 'Failed to delete Outlook draft.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to delete Outlook draft.')
     }
     return next(error)
   }
 })
 
 router.get('/outlook/conversation/:conversationId', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   let { accessToken, refreshToken } = tokens
   const { conversationId } = req.params
@@ -1406,8 +1695,12 @@ router.get('/outlook/conversation/:conversationId', async (req, res, next) => {
       return accessToken
     } catch (err) {
       if (err.statusCode === 401 && refreshToken) {
-        const fresh = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (fresh) { accessToken = fresh; return fresh }
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          return refreshed.accessToken
+        }
       }
       throw err
     }
@@ -1455,18 +1748,16 @@ router.get('/outlook/conversation/:conversationId', async (req, res, next) => {
   } catch (error) {
     if (error.graphError) {
       console.error('GRAPH API ERROR (conversation):', error.graphError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch conversation.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to fetch conversation.')
     }
     return next(error)
   }
 })
 
 router.patch('/outlook/:id/flag', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   let { accessToken, refreshToken } = tokens
   const { id } = req.params
@@ -1474,18 +1765,17 @@ router.patch('/outlook/:id/flag', async (req, res, next) => {
   const body = JSON.stringify({ flag: { flagStatus: flagged ? 'flagged' : 'notFlagged' } })
 
   async function patchFlag(token) {
-    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${id}`, {
-      method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body,
+    await performProviderFetch({
+      provider: 'outlook',
+      requestLabel: 'outlook.flag',
+      url: `https://graph.microsoft.com/v1.0/me/messages/${id}`,
+      options: {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body,
+      },
+      responseType: 'response',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const error = new Error(`Microsoft Graph API request failed with status ${response.status}.`)
-      error.statusCode = response.status
-      error.graphError = errorText
-      throw error
-    }
   }
 
   try {
@@ -1493,9 +1783,10 @@ router.patch('/outlook/:id/flag', async (req, res, next) => {
       await patchFlag(accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          await patchFlag(freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          await patchFlag(refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1507,18 +1798,16 @@ router.patch('/outlook/:id/flag', async (req, res, next) => {
   } catch (error) {
     if (error.graphError) {
       console.error('GRAPH API ERROR (flag):', error.graphError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to update flag.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to update flag.')
     }
     return next(error)
   }
 })
 
 router.get('/outlook/:id', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected or token missing.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   let { accessToken, refreshToken } = tokens
 
@@ -1530,9 +1819,11 @@ router.get('/outlook/:id', async (req, res, next) => {
       msg = await fetchGraphJson(url, accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          msg = await fetchGraphJson(url, freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          accessToken = refreshed.accessToken
+          refreshToken = refreshed.refreshToken || refreshToken
+          msg = await fetchGraphJson(url, refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1570,18 +1861,16 @@ router.get('/outlook/:id', async (req, res, next) => {
   } catch (error) {
     if (error.graphError) {
       console.error('GRAPH API ERROR (detail):', error.graphError)
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook message.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to fetch Outlook message.')
     }
     return next(error)
   }
 })
 
 router.get('/outlook/:id/attachments/:attachmentId', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   let { accessToken, refreshToken } = tokens
 
@@ -1598,9 +1887,10 @@ router.get('/outlook/:id/attachments/:attachmentId', async (req, res, next) => {
       attachment = await fetchAtt(accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          attachment = await fetchAtt(freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          attachment = await fetchAtt(refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1615,35 +1905,32 @@ router.get('/outlook/:id/attachments/:attachmentId', async (req, res, next) => {
     return res.send(buffer)
   } catch (error) {
     if (error.graphError) {
-      return res.status(error.statusCode || 500).json({ message: 'Failed to fetch Outlook attachment.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to fetch Outlook attachment.')
     }
     return next(error)
   }
 })
 
 router.patch('/outlook/:id/read', async (req, res, next) => {
-  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
-  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
-
-  const tokens = await getOutlookTokens(userId)
-  if (!tokens) return res.status(401).json({ message: 'Outlook account not connected.' })
+  const authContext = await getAuthorizedOutlookContext(req, res)
+  if (!authContext) return
+  const { userId, tokens } = authContext
 
   const read = Boolean(req.body?.read)
   let { accessToken, refreshToken } = tokens
 
   async function patchIsRead(token) {
-    const response = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isRead: read }),
+    await performProviderFetch({
+      provider: 'outlook',
+      requestLabel: 'outlook.read',
+      url: `https://graph.microsoft.com/v1.0/me/messages/${req.params.id}`,
+      options: {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isRead: read }),
+      },
+      responseType: 'response',
     })
-    if (!response.ok) {
-      const errorText = await response.text()
-      const err = new Error(`Graph PATCH failed: ${response.status}`)
-      err.statusCode = response.status
-      err.graphError = errorText
-      throw err
-    }
   }
 
   try {
@@ -1651,9 +1938,10 @@ router.patch('/outlook/:id/read', async (req, res, next) => {
       await patchIsRead(accessToken)
     } catch (graphError) {
       if (graphError.statusCode === 401 && refreshToken) {
-        const freshToken = await tryRefreshMicrosoftToken(userId, refreshToken)
-        if (freshToken) {
-          await patchIsRead(freshToken)
+        const refreshed = await tryRefreshMicrosoftToken(userId, refreshToken)
+        if (refreshed?.accessToken) {
+          refreshToken = refreshed.refreshToken || refreshToken
+          await patchIsRead(refreshed.accessToken)
         } else {
           throw graphError
         }
@@ -1664,7 +1952,7 @@ router.patch('/outlook/:id/read', async (req, res, next) => {
     return res.status(200).json({ ok: true, read })
   } catch (error) {
     if (error.graphError) {
-      return res.status(error.statusCode || 500).json({ message: 'Failed to update Outlook read state.', graph_error: error.graphError })
+      return sendProviderError(res, 'outlook', error, 'Failed to update Outlook read state.')
     }
     return next(error)
   }

@@ -107,6 +107,7 @@ router.get('/microsoft/callback', async (req, res) => {
         email,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
+        tokenExpiresAt: tokens.expires_in ? new Date(Date.now() + Number(tokens.expires_in) * 1000) : undefined,
       })
     } catch (upsertError) {
       console.error('Failed to upsert Outlook account:', upsertError)
@@ -205,6 +206,7 @@ router.get('/google/callback', async (req, res) => {
         email,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
+        tokenExpiresAt: tokens.expires_in ? new Date(Date.now() + Number(tokens.expires_in) * 1000) : undefined,
       })
     } catch (upsertError) {
       console.error('Failed to upsert Gmail account:', upsertError)

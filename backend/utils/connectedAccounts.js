@@ -10,6 +10,13 @@ function summarizeTokenState(token) {
   return token == null ? 'null' : 'present'
 }
 
+function normalizeTokenExpiresAt(tokenExpiresAt) {
+  if (!tokenExpiresAt) return null
+  const parsedDate = tokenExpiresAt instanceof Date ? tokenExpiresAt : new Date(tokenExpiresAt)
+  if (Number.isNaN(parsedDate.getTime())) return null
+  return parsedDate.toISOString()
+}
+
 function scoreConnectedAccountRow(row) {
   let score = 0
   if (row?.provider_access_token) score += 2
@@ -58,7 +65,7 @@ function logConnectedAccountTokenWrite({
 async function listConnectedAccounts({ userId, provider, email }) {
   let query = supabaseAdmin
     .from('connected_accounts')
-    .select('user_id, provider, email, provider_access_token, provider_refresh_token')
+    .select('user_id, provider, email, provider_access_token, provider_refresh_token, provider_token_expires_at')
     .eq('user_id', userId)
     .eq('provider', provider)
 
@@ -89,6 +96,7 @@ async function upsertConnectedAccountTokens({
   email,
   accessToken,
   refreshToken,
+  tokenExpiresAt,
 }) {
   if (!userId || !provider || email == null) {
     throw new Error('Missing connected account identity for upsert.')
@@ -100,6 +108,10 @@ async function upsertConnectedAccountTokens({
   const existingRow = await getPreferredConnectedAccount({ userId, provider, email })
   const nextRefreshToken = refreshToken ?? existingRow?.provider_refresh_token ?? undefined
   const nextAccessToken = accessToken
+  const nextTokenExpiresAt =
+    tokenExpiresAt !== undefined
+      ? normalizeTokenExpiresAt(tokenExpiresAt)
+      : (existingRow?.provider_token_expires_at || undefined)
 
   logConnectedAccountTokenWrite({
     codePath,
@@ -109,6 +121,7 @@ async function upsertConnectedAccountTokens({
     existingRow,
     nextAccessToken,
     nextRefreshToken,
+    nextTokenExpiresAt,
     accessTokenChanged: existingRow?.provider_access_token !== nextAccessToken,
     refreshTokenChanged:
       nextRefreshToken !== undefined && existingRow?.provider_refresh_token !== nextRefreshToken,
@@ -123,6 +136,9 @@ async function upsertConnectedAccountTokens({
 
   if (nextRefreshToken !== undefined) {
     payload.provider_refresh_token = nextRefreshToken
+  }
+  if (nextTokenExpiresAt !== undefined) {
+    payload.provider_token_expires_at = nextTokenExpiresAt
   }
 
   const { error } = await supabaseAdmin
@@ -141,6 +157,7 @@ async function updateConnectedAccountTokens({
   email,
   accessToken,
   refreshToken,
+  tokenExpiresAt,
   allowTokenClear = false,
 }) {
   const existingRow = await getPreferredConnectedAccount({
@@ -157,6 +174,7 @@ async function updateConnectedAccountTokens({
   const updatePayload = {}
   let nextAccessToken = existingRow.provider_access_token
   let nextRefreshToken = existingRow.provider_refresh_token
+  let nextTokenExpiresAt = existingRow.provider_token_expires_at || null
 
   if (accessToken !== undefined) {
     if (accessToken == null) {
@@ -184,6 +202,11 @@ async function updateConnectedAccountTokens({
     }
   }
 
+  if (tokenExpiresAt !== undefined) {
+    nextTokenExpiresAt = normalizeTokenExpiresAt(tokenExpiresAt)
+    updatePayload.provider_token_expires_at = nextTokenExpiresAt
+  }
+
   const accessTokenChanged =
     Object.prototype.hasOwnProperty.call(updatePayload, 'provider_access_token') &&
     existingRow.provider_access_token !== nextAccessToken
@@ -199,6 +222,7 @@ async function updateConnectedAccountTokens({
     existingRow,
     nextAccessToken,
     nextRefreshToken,
+    nextTokenExpiresAt,
     accessTokenChanged,
     refreshTokenChanged,
   })
