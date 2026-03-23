@@ -1013,7 +1013,7 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
         recipient: to,
         subject,
         userPrompt,
-        detectedLanguage: detectedLanguageRef.current || detectLanguageFromText(userPrompt),
+        detectedInputLanguage: detectedLanguageRef.current || detectLanguageFromText(userPrompt),
       }),
     })
     const data = await response.json()
@@ -3061,7 +3061,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           recipient: selectedEmail.email,
           subject: `Re: ${selectedEmail.subject}`,
           userPrompt: aiPrompt.trim(),
-          detectedLanguage: replyDetectedLanguage || detectLanguageFromText(aiPrompt.trim()),
+          detectedInputLanguage: replyDetectedLanguage || detectLanguageFromText(aiPrompt.trim()),
         }),
       })
       const data = await response.json()
@@ -3214,7 +3214,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
             recipient: selectedEmail.email,
             subject: `Re: ${selectedEmail.subject}`,
             userPrompt: prompt,
-            detectedLanguage: replyDetectedLanguage || detectLanguageFromText(prompt),
+            detectedInputLanguage: replyDetectedLanguage || detectLanguageFromText(prompt),
           }),
         })
         const data = await response.json()
