@@ -21,9 +21,15 @@ router.get('/microsoft/authorize', authMiddleware, (req, res) => {
   const userId = req.user.userId
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
 
+  // Optional email hint — if the caller knows the user's Microsoft email upfront,
+  // pass it as ?email=user@domain.com to enable domain_hint for federated accounts.
+  const loginHint = typeof req.query.email === 'string' ? req.query.email.trim() : ''
+  const domainHint = loginHint.includes('@') ? loginHint.split('@')[1] : ''
+
   const params = new URLSearchParams({
     client_id: process.env.MICROSOFT_CLIENT_ID,
     response_type: 'code',
+    response_mode: 'query',
     redirect_uri: MICROSOFT_BACKEND_REDIRECT,
     scope: [
       'openid', 'profile', 'email', 'offline_access',
@@ -32,9 +38,12 @@ router.get('/microsoft/authorize', authMiddleware, (req, res) => {
       'https://graph.microsoft.com/Mail.ReadWrite',
       'https://graph.microsoft.com/Mail.Send',
     ].join(' '),
-    prompt: 'select_account',
+    prompt: 'login',
     state: Buffer.from(JSON.stringify({ userId, frontendUrl })).toString('base64'),
   })
+
+  if (loginHint) params.set('login_hint', loginHint)
+  if (domainHint) params.set('domain_hint', domainHint)
 
   const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params.toString()}`
   console.log('[Microsoft OAuth] Authorization URL:', url)
