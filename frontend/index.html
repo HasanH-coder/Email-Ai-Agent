@@ -3,6 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        if (localStorage.getItem('mailpilot:darkMode') === 'true') {
+          document.documentElement.classList.add('dark-mode');
+        }
+      })();
+    </script>
     <meta name="theme-color" content="#4f46e5" />
     <title>MailPilot - AI-Powered Email</title>
     <meta name="description" content="Your AI Email Copilot. Let AI read, draft, and send your emails so you can focus on what matters." />

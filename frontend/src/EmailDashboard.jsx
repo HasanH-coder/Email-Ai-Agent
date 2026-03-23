@@ -6,6 +6,14 @@ import { getSupabase } from './services/supabaseClient'
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5001'
 
+function detectLanguageFromText(text) {
+  if (!text) return 'English'
+  const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length
+  const totalChars = text.replace(/\s/g, '').length
+  if (totalChars === 0) return 'English'
+  return arabicChars / totalChars > 0.4 ? 'Arabic' : 'English'
+}
+
 const EMAIL_STORAGE_KEYS = {
   gmail: 'mailpilot:gmailEmails',
   outlook: 'mailpilot:outlookEmails:v2',
@@ -854,9 +862,14 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
   const [isGenerating, setIsGenerating] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
   const [draftSaveFailed, setDraftSaveFailed] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
   const backdropRef = useRef(null)
   const attachmentButtonRef = useRef(null)
   const fileInputRef = useRef(null)
+  const mediaRecorderRef = useRef(null)
+  const audioChunksRef = useRef([])
+  const detectedLanguageRef = useRef(null)
   const isEditing = !!initialData
   const hasRecipient = to.trim().length > 0
   const hasPrompt = aiPrompt.trim().length > 0
@@ -936,6 +949,58 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
     return data?.session?.access_token || null
   }
 
+  async function handleToggleRecording() {
+    if (isRecording) {
+      mediaRecorderRef.current?.stop()
+      setIsRecording(false)
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        audioChunksRef.current = []
+        const mediaRecorder = new MediaRecorder(stream)
+        mediaRecorderRef.current = mediaRecorder
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunksRef.current.push(e.data)
+        }
+
+        mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop())
+          const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+          const formData = new FormData()
+          formData.append('audio', blob, 'recording.webm')
+
+          setIsTranscribing(true)
+          try {
+            const token = await getSupabaseAccessToken()
+            const response = await fetch(`${BACKEND_URL}/api/ai/transcribe`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` },
+              body: formData,
+            })
+            const data = await response.json()
+            if (!response.ok) throw new Error(data.error || 'Transcription failed')
+            detectedLanguageRef.current = data.detectedLanguage || null
+            setAiPrompt((prev) => (prev ? prev + ' ' + data.text : data.text))
+          } catch (err) {
+            setComposeMessage('Transcription failed: ' + err.message)
+          } finally {
+            setIsTranscribing(false)
+          }
+        }
+
+        mediaRecorder.start()
+        setIsRecording(true)
+      } catch (err) {
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          setComposeMessage('Microphone permission denied. Please allow microphone access and try again.')
+        } else {
+          setComposeMessage('Could not access microphone: ' + err.message)
+        }
+      }
+    }
+  }
+
   async function callGenerateEmailApi(userPrompt) {
     const token = await getSupabaseAccessToken()
     const response = await fetch(`${BACKEND_URL}/api/ai/generate-email`, {
@@ -944,7 +1009,12 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ recipient: to, subject, userPrompt }),
+      body: JSON.stringify({
+        recipient: to,
+        subject,
+        userPrompt,
+        detectedLanguage: detectedLanguageRef.current || detectLanguageFromText(userPrompt),
+      }),
     })
     const data = await response.json()
     if (!response.ok) throw new Error(data.error || 'Failed to generate email.')
@@ -1252,12 +1322,44 @@ function ComposeModal({ isOpen, onClose, initialData, onSaveDraft, onSendEmail, 
               {/* AI prompt for new emails */}
               {!isEditing && (
                 <div>
-                  <label htmlFor="compose-prompt" className="block text-xs font-medium text-slate-500 mb-1">Tell the AI what to write</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label htmlFor="compose-prompt" className="text-xs font-medium text-slate-500">Tell the AI what to write</label>
+                    <button
+                      type="button"
+                      onClick={handleToggleRecording}
+                      disabled={isTranscribing}
+                      title={isRecording ? 'Stop recording' : 'Start voice input'}
+                      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                        isRecording
+                          ? 'text-red-600 bg-red-50 hover:bg-red-100'
+                          : isTranscribing
+                          ? 'text-slate-400 bg-slate-100 cursor-not-allowed'
+                          : 'text-slate-500 bg-slate-100 hover:bg-slate-200'
+                      }`}
+                    >
+                      {isRecording ? (
+                        <>
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+                          </span>
+                          Stop
+                        </>
+                      ) : isTranscribing ? (
+                        <>
+                          <span className="w-3 h-3 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                          Transcribing...
+                        </>
+                      ) : (
+                        <>🎤</>
+                      )}
+                    </button>
+                  </div>
                   <textarea
                     id="compose-prompt"
                     rows={12}
                     value={aiPrompt}
-                    onChange={(e) => setAiPrompt(e.target.value)}
+                    onChange={(e) => { detectedLanguageRef.current = null; setAiPrompt(e.target.value) }}
                     placeholder="e.g. Write a follow-up email about the Q1 budget proposal..."
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
                   />
@@ -1513,6 +1615,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [outlookDetailLoadingId, setOutlookDetailLoadingId] = useState(null)
 
   // Settings state
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('mailpilot:darkMode') === 'true')
   const [signature, setSignature] = useState('')
   const [useSignature, setUseSignature] = useState(true)
   const [connectedAccounts, setConnectedAccounts] = useState({ gmail: false, outlook: false })
@@ -1536,6 +1639,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [aiGeneratedMeta, setAiGeneratedMeta] = useState(null)
   const [aiActionMessage, setAiActionMessage] = useState('')
   const [aiActionTone, setAiActionTone] = useState('error')
+  const [replyDetectedLanguage, setReplyDetectedLanguage] = useState(null)
   const [inboxReplyAttachments, setInboxReplyAttachments] = useState([])
   const gmailPageLoadRef = useRef(false)
   const gmailDetailLoadRef = useRef(new Set())
@@ -1554,6 +1658,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const effectiveConnectedAccountRows = Array.isArray(connectedAccountRows)
     ? connectedAccountRows
     : fetchedConnectedAccountRows
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark-mode', darkMode)
+    localStorage.setItem('mailpilot:darkMode', String(darkMode))
+  }, [darkMode])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -2892,6 +3001,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           recipient: selectedEmail.email,
           subject: `Re: ${selectedEmail.subject}`,
           userPrompt: aiPrompt.trim(),
+          detectedLanguage: replyDetectedLanguage || detectLanguageFromText(aiPrompt.trim()),
         }),
       })
       const data = await response.json()
@@ -2976,6 +3086,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   function handleInboxPromptChange(value) {
     setAiPrompt(value)
+    setReplyDetectedLanguage(null)
     if (aiActionMessage) {
       setAiActionMessage('')
       setAiActionTone('error')
@@ -3043,6 +3154,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
             recipient: selectedEmail.email,
             subject: `Re: ${selectedEmail.subject}`,
             userPrompt: prompt,
+            detectedLanguage: replyDetectedLanguage || detectLanguageFromText(prompt),
           }),
         })
         const data = await response.json()
@@ -3287,6 +3399,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               onDirectSendRequest={handleRequestDirectSend}
               onSendGeneratedRequest={handleSendGeneratedFromExpanded}
               onReplyAttachmentsChange={setInboxReplyAttachments}
+              onDetectedLanguageChange={setReplyDetectedLanguage}
               outlookConversationMessages={outlookConversationMessages}
               loadingConversationIds={loadingConversationIds}
               failedConversationIds={failedConversationIds}
@@ -3309,6 +3422,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           )}
           {activePage === 'settings' && (
             <SettingsPage
+              darkMode={darkMode}
+              setDarkMode={setDarkMode}
               signature={signature}
               setSignature={setSignature}
               useSignature={useSignature}
@@ -3553,9 +3668,15 @@ function InboxPage({
   onLoadConversation,
   onDownloadAttachment,
   onReplyAttachmentsChange,
+  onDetectedLanguageChange,
 }) {
   const [expandedThreadIds, setExpandedThreadIds] = useState(new Set())
   const [replyAttachments, setReplyAttachments] = useState([])
+  const [isReplyRecording, setIsReplyRecording] = useState(false)
+  const [isReplyTranscribing, setIsReplyTranscribing] = useState(false)
+  const [replyVoiceError, setReplyVoiceError] = useState('')
+  const replyMediaRecorderRef = useRef(null)
+  const replyAudioChunksRef = useRef([])
   const replyFileInputRef = useRef(null)
 
   useEffect(() => {
@@ -3565,6 +3686,60 @@ function InboxPage({
   const groupedEmails = activeProvider === 'gmail' ? groupEmailsByDate(emails) : []
   const outlookThreads = activeProvider === 'outlook' ? groupOutlookEmailsByThread(emails) : []
   const groupedOutlookThreads = activeProvider === 'outlook' ? groupOutlookThreadsByDate(outlookThreads) : []
+
+  async function handleToggleReplyRecording() {
+    if (isReplyRecording) {
+      replyMediaRecorderRef.current?.stop()
+      setIsReplyRecording(false)
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        replyAudioChunksRef.current = []
+        const mediaRecorder = new MediaRecorder(stream)
+        replyMediaRecorderRef.current = mediaRecorder
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) replyAudioChunksRef.current.push(e.data)
+        }
+
+        mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop())
+          const blob = new Blob(replyAudioChunksRef.current, { type: 'audio/webm' })
+          const formData = new FormData()
+          formData.append('audio', blob, 'recording.webm')
+
+          setIsReplyTranscribing(true)
+          try {
+            const supabase = getSupabase()
+            const { data: sessionData } = await supabase.auth.getSession()
+            const token = sessionData?.session?.access_token || null
+            const response = await fetch(`${BACKEND_URL}/api/ai/transcribe`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` },
+              body: formData,
+            })
+            const data = await response.json()
+            if (!response.ok) throw new Error(data.error || 'Transcription failed')
+            setAiPrompt((prev) => (prev ? prev + ' ' + data.text : data.text))
+            onDetectedLanguageChange?.(data.detectedLanguage || null)
+          } catch (err) {
+            setReplyVoiceError('Transcription failed: ' + err.message)
+          } finally {
+            setIsReplyTranscribing(false)
+          }
+        }
+
+        mediaRecorder.start()
+        setIsReplyRecording(true)
+      } catch (err) {
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          setReplyVoiceError('Microphone permission denied. Please allow microphone access and try again.')
+        } else {
+          setReplyVoiceError('Could not access microphone: ' + err.message)
+        }
+      }
+    }
+  }
 
   function toggleThread(conversationId, e) {
     e.stopPropagation()
@@ -4062,13 +4237,48 @@ function InboxPage({
 
             {/* AI Assistant */}
             <div className="border-t border-slate-100 px-5 py-4 bg-slate-50/70">
-              <div className="flex items-center gap-2 mb-2">
-                <SparklesIcon className="w-4 h-4 text-indigo-500" />
-                <span className="text-xs font-semibold text-slate-600">AI Assistant</span>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <SparklesIcon className="w-4 h-4 text-indigo-500" />
+                  <span className="text-xs font-semibold text-slate-600">AI Assistant</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleToggleReplyRecording}
+                  disabled={isReplyTranscribing}
+                  title={isReplyRecording ? 'Stop recording' : 'Start voice input'}
+                  className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                    isReplyRecording
+                      ? 'text-red-600 bg-red-50 hover:bg-red-100'
+                      : isReplyTranscribing
+                      ? 'text-slate-400 bg-slate-100 cursor-not-allowed'
+                      : 'text-slate-500 bg-slate-100 hover:bg-slate-200'
+                  }`}
+                >
+                  {isReplyRecording ? (
+                    <>
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+                      </span>
+                      Stop
+                    </>
+                  ) : isReplyTranscribing ? (
+                    <>
+                      <span className="w-3 h-3 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                      Transcribing...
+                    </>
+                  ) : (
+                    <>🎤</>
+                  )}
+                </button>
               </div>
+              {replyVoiceError && (
+                <p className="mb-2 text-xs font-medium text-red-600">{replyVoiceError}</p>
+              )}
               <textarea
                 value={aiPrompt}
-                onChange={(e) => setAiPrompt(e.target.value)}
+                onChange={(e) => { setReplyVoiceError(''); setAiPrompt(e.target.value) }}
                 rows={2}
                 placeholder={aiGeneratedEmail ? 'Send a new prompt to regenerate this email...' : 'Tell the AI how to reply...'}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
@@ -4526,13 +4736,40 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onS
 
 
 // --- Settings Page ---
-function SettingsPage({ signature, setSignature, useSignature, setUseSignature, connectedAccounts, connectedEmails, onConnectRequest, onDisconnect, connectActionError }) {
+function SettingsPage({ darkMode, setDarkMode, signature, setSignature, useSignature, setUseSignature, connectedAccounts, connectedEmails, onConnectRequest, onDisconnect, connectActionError }) {
   return (
     <div className="h-full overflow-y-auto bg-white">
       <div className="max-w-2xl mx-auto px-6 py-8">
         <div className="flex items-center gap-3 mb-8">
           <SettingsIcon className="w-6 h-6 text-slate-400" />
           <h2 className="text-xl font-bold text-slate-900">Settings</h2>
+        </div>
+
+        {/* Appearance */}
+        <div className="mb-10">
+          <h3 className="text-sm font-bold text-slate-900 mb-1">Appearance</h3>
+          <p className="text-xs text-slate-500 mb-3">Choose your preferred theme.</p>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-base leading-none">{darkMode ? '🌙' : '☀️'}</span>
+              <span className="text-sm font-medium text-slate-700">Dark Mode</span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={darkMode}
+              onClick={() => setDarkMode(!darkMode)}
+              className={`relative w-11 h-6 rounded-full transition-colors duration-300 cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
+                darkMode ? 'bg-indigo-600' : 'bg-slate-200'
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-300 ${
+                  darkMode ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
         </div>
 
         {/* Email Signature */}
