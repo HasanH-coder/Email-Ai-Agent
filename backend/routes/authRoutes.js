@@ -2,7 +2,7 @@ const express = require('express')
 
 const { signup, login, me } = require('../controllers/authController')
 const authMiddleware = require('../middleware/authMiddleware')
-const supabaseAdmin = require('../config/supabase')
+const { upsertConnectedAccountTokens } = require('../utils/connectedAccounts')
 
 const router = express.Router()
 
@@ -99,18 +99,16 @@ router.get('/microsoft/callback', async (req, res) => {
     const profile = profileResp.ok ? await profileResp.json() : {}
     const email = profile.mail || profile.userPrincipalName || ''
 
-    const { error: upsertError } = await supabaseAdmin.from('connected_accounts').upsert(
-      [{
-        user_id: userId,
+    try {
+      await upsertConnectedAccountTokens({
+        codePath: 'auth.microsoft.callback',
+        userId,
         provider: 'outlook',
         email,
-        provider_access_token: tokens.access_token,
-        provider_refresh_token: tokens.refresh_token || null,
-      }],
-      { onConflict: 'user_id,provider' }
-    )
-
-    if (upsertError) {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+      })
+    } catch (upsertError) {
       console.error('Failed to upsert Outlook account:', upsertError)
       return res.redirect(`${frontendUrl}/dashboard?connect_error=outlook`)
     }
@@ -199,18 +197,16 @@ router.get('/google/callback', async (req, res) => {
     const profile = profileResp.ok ? await profileResp.json() : {}
     const email = profile.email || ''
 
-    const { error: upsertError } = await supabaseAdmin.from('connected_accounts').upsert(
-      [{
-        user_id: userId,
+    try {
+      await upsertConnectedAccountTokens({
+        codePath: 'auth.google.callback',
+        userId,
         provider: 'gmail',
         email,
-        provider_access_token: tokens.access_token,
-        provider_refresh_token: tokens.refresh_token || null,
-      }],
-      { onConflict: 'user_id,provider' }
-    )
-
-    if (upsertError) {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+      })
+    } catch (upsertError) {
       console.error('Failed to upsert Gmail account:', upsertError)
       return res.redirect(`${frontendUrl}/dashboard?connect_error=gmail`)
     }

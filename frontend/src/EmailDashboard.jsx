@@ -2269,6 +2269,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         .from('connected_accounts')
         .select('provider,email')
         .eq('user_id', userId)
+        .not('provider_access_token', 'is', null)
       if (cancelled) return
 
       if (error) {

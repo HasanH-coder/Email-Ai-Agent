@@ -1,5 +1,9 @@
 const express = require('express')
 const supabaseAdmin = require('../config/supabase')
+const {
+  getPreferredConnectedAccount,
+  updateConnectedAccountTokens,
+} = require('../utils/connectedAccounts')
 
 const router = express.Router()
 
@@ -792,14 +796,22 @@ async function getUserIdFromSupabaseToken(authHeader) {
 // --- Gmail DB-based token helpers ---
 
 async function getGmailTokens(userId) {
-  const { data, error } = await supabaseAdmin
-    .from('connected_accounts')
-    .select('provider_access_token, provider_refresh_token')
-    .eq('user_id', userId)
-    .eq('provider', 'gmail')
-    .single()
-  if (error || !data?.provider_access_token) return null
-  return { accessToken: data.provider_access_token, refreshToken: data.provider_refresh_token || null }
+  try {
+    const data = await getPreferredConnectedAccount({
+      userId,
+      provider: 'gmail',
+      requireAccessToken: true,
+    })
+    if (!data?.provider_access_token) return null
+    return {
+      email: data.email || '',
+      accessToken: data.provider_access_token,
+      refreshToken: data.provider_refresh_token || null,
+    }
+  } catch (error) {
+    console.error('Failed to load Gmail tokens:', error)
+    return null
+  }
 }
 
 async function tryRefreshGoogleToken(userId, refreshToken) {
@@ -819,26 +831,41 @@ async function tryRefreshGoogleToken(userId, refreshToken) {
     if (!response.ok) return null
     const data = await response.json()
     if (!data.access_token) return null
-    await supabaseAdmin
-      .from('connected_accounts')
-      .update({ provider_access_token: data.access_token })
-      .eq('user_id', userId)
-      .eq('provider', 'gmail')
+    await updateConnectedAccountTokens({
+      codePath: 'emails.gmail.refresh',
+      userId,
+      provider: 'gmail',
+      accessToken: data.access_token,
+      refreshToken: Object.prototype.hasOwnProperty.call(data, 'refresh_token')
+        ? data.refresh_token
+        : undefined,
+    })
     return data.access_token
-  } catch { return null }
+  } catch (error) {
+    console.error('Failed to refresh Gmail token:', error)
+    return null
+  }
 }
 
 // --- Outlook DB-based token helpers ---
 
 async function getOutlookTokens(userId) {
-  const { data, error } = await supabaseAdmin
-    .from('connected_accounts')
-    .select('provider_access_token, provider_refresh_token')
-    .eq('user_id', userId)
-    .eq('provider', 'outlook')
-    .single()
-  if (error || !data?.provider_access_token) return null
-  return { accessToken: data.provider_access_token, refreshToken: data.provider_refresh_token || null }
+  try {
+    const data = await getPreferredConnectedAccount({
+      userId,
+      provider: 'outlook',
+      requireAccessToken: true,
+    })
+    if (!data?.provider_access_token) return null
+    return {
+      email: data.email || '',
+      accessToken: data.provider_access_token,
+      refreshToken: data.provider_refresh_token || null,
+    }
+  } catch (error) {
+    console.error('Failed to load Outlook tokens:', error)
+    return null
+  }
 }
 
 async function tryRefreshMicrosoftToken(userId, refreshToken) {
@@ -859,13 +886,18 @@ async function tryRefreshMicrosoftToken(userId, refreshToken) {
     if (!response.ok) return null
     const data = await response.json()
     if (!data.access_token) return null
-    await supabaseAdmin
-      .from('connected_accounts')
-      .update({ provider_access_token: data.access_token, provider_refresh_token: data.refresh_token || refreshToken })
-      .eq('user_id', userId)
-      .eq('provider', 'outlook')
+    await updateConnectedAccountTokens({
+      codePath: 'emails.outlook.refresh',
+      userId,
+      provider: 'outlook',
+      accessToken: data.access_token,
+      refreshToken: Object.prototype.hasOwnProperty.call(data, 'refresh_token')
+        ? data.refresh_token
+        : undefined,
+    })
     return data.access_token
-  } catch {
+  } catch (error) {
+    console.error('Failed to refresh Outlook token:', error)
     return null
   }
 }

@@ -90,6 +90,32 @@ function clearConnectingProviderIntent() {
   window.localStorage.removeItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
 }
 
+function summarizeTokenPresence(token) {
+  return token == null ? 'null' : 'present'
+}
+
+function logConnectedAccountTokenWrite({
+  codePath,
+  userId,
+  provider,
+  email,
+  accessToken,
+  refreshToken,
+  accessTokenChanged,
+  refreshTokenChanged,
+}) {
+  console.info('[connected_accounts] token write', {
+    codePath,
+    user_id: userId,
+    provider,
+    email: email || null,
+    access_token_changed: accessTokenChanged,
+    refresh_token_changed: refreshTokenChanged,
+    next_access_token: summarizeTokenPresence(accessToken),
+    next_refresh_token: summarizeTokenPresence(refreshToken),
+  })
+}
+
 function ProtectedRoute({ canAccess, onDeny, children }) {
   useEffect(() => {
     if (!canAccess) onDeny()
@@ -122,6 +148,7 @@ export default function App() {
       .from('connected_accounts')
       .select('provider,email')
       .eq('user_id', userId)
+      .not('provider_access_token', 'is', null)
 
     if (error) {
       console.error('Failed to refresh connected accounts:', error)
@@ -402,11 +429,23 @@ export default function App() {
         console.error('Invalid oauth_provider_hint. Skipping connected_accounts upsert.', providerHint)
         return
       }
-      const accountEmail = getBestIdentityEmail(user, providerHint)
+      const accountEmail = getBestIdentityEmail(user, providerHint) || ''
       // Use authSession directly — it has the correct provider_token from the OAuth callback.
       // Calling getSession() again can return a stale or different provider's token.
       const accessToken = authSession?.provider_token
       const refreshToken = authSession?.provider_refresh_token
+
+      if (!accessToken) {
+        console.info('[connected_accounts] skipping auth sync write without provider access token', {
+          codePath: 'frontend.auth.saveConnectedAccount',
+          user_id: user.id,
+          provider: providerHint,
+          email: accountEmail || null,
+          next_access_token: summarizeTokenPresence(accessToken),
+          next_refresh_token: summarizeTokenPresence(refreshToken),
+        })
+        return
+      }
 
       console.log('Connected account upsert payload:', {
         userId: user.id,
@@ -417,37 +456,36 @@ export default function App() {
 
       writeProviderTokenStatus(providerHint, true)
 
-      const { error: upsertError } = await supabase.from('connected_accounts').upsert(
-        [
-          {
-            user_id: user.id,
-            provider: providerHint,
-            email: accountEmail,
-            provider_access_token: accessToken,
-            provider_refresh_token: refreshToken,
-          },
-        ],
-        { onConflict: 'user_id,provider' }
-      )
+      const payload = {
+        user_id: user.id,
+        provider: providerHint,
+        email: accountEmail,
+        provider_access_token: accessToken,
+      }
+
+      if (refreshToken) {
+        payload.provider_refresh_token = refreshToken
+      }
+
+      logConnectedAccountTokenWrite({
+        codePath: 'frontend.auth.saveConnectedAccount',
+        userId: user.id,
+        provider: providerHint,
+        email: accountEmail,
+        accessToken,
+        refreshToken,
+        accessTokenChanged: true,
+        refreshTokenChanged: Boolean(refreshToken),
+      })
+
+      const { error: upsertError } = await supabase
+        .from('connected_accounts')
+        .upsert([payload], { onConflict: 'user_id,provider,email' })
 
       if (cancelled) return
       if (upsertError) {
         console.error('Failed to upsert connected account:', upsertError)
         return
-      }
-
-      // On fresh login, remove all other providers from the DB so they don't
-      // auto-connect. Each provider must be explicitly reconnected per session.
-      const otherProviders = ['gmail', 'outlook'].filter(p => p !== providerHint)
-      for (const other of otherProviders) {
-        const { error: deleteError } = await supabase
-          .from('connected_accounts')
-          .delete()
-          .eq('user_id', user.id)
-          .eq('provider', other)
-        if (deleteError) {
-          console.error(`Failed to clear ${other} connected account on fresh login:`, deleteError)
-        }
       }
 
       await refreshConnectedAccountRows(supabase, user.id)
