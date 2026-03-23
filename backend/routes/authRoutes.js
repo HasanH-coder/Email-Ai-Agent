@@ -32,11 +32,12 @@ router.get('/microsoft/authorize', authMiddleware, (req, res) => {
       'https://graph.microsoft.com/Mail.ReadWrite',
       'https://graph.microsoft.com/Mail.Send',
     ].join(' '),
-    prompt: 'consent',
+    prompt: 'select_account',
     state: Buffer.from(JSON.stringify({ userId, frontendUrl })).toString('base64'),
   })
 
   const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params.toString()}`
+  console.log('[Microsoft OAuth] Authorization URL:', url)
   return res.json({ url })
 })
 
