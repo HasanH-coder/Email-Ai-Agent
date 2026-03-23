@@ -1589,7 +1589,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [outlookDrafts, setOutlookDrafts] = useState([])
   const [outlookSentEmails, setOutlookSentEmails] = useState([])
   const [emailThreads, setEmailThreads] = useState({})
-  const [selectedSentEmailId, setSelectedSentEmailId] = useState(null)
+  const [selectedSentEmailIds, setSelectedSentEmailIds] = useState({ gmail: null, outlook: null })
   const [selectedEmailId, setSelectedEmailId] = useState(null)
   const [activeFilter, setActiveFilter] = useState('all')
   const [activePage, setActivePage] = useState('inbox')
@@ -2611,13 +2611,20 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }, [effectiveConnectedAccountRows, activeProvider])
 
   useEffect(() => {
-    if (currentSentEmails.length === 0) return
+    setSelectedSentEmailIds((prev) => {
+      const next = { ...prev }
+      const gmailHasSelection = gmailSentEmails.some((email) => email.id === prev.gmail)
+      const outlookHasSelection = outlookSentEmails.some((email) => email.id === prev.outlook)
 
-    const hasSelectedSentEmail = currentSentEmails.some((email) => email.id === selectedSentEmailId)
-    if (!hasSelectedSentEmail) {
-      setSelectedSentEmailId(currentSentEmails[0].id)
-    }
-  }, [currentSentEmails, selectedSentEmailId])
+      next.gmail = gmailHasSelection ? prev.gmail : (gmailSentEmails[0]?.id || null)
+      next.outlook = outlookHasSelection ? prev.outlook : (outlookSentEmails[0]?.id || null)
+
+      if (next.gmail === prev.gmail && next.outlook === prev.outlook) {
+        return prev
+      }
+      return next
+    })
+  }, [gmailSentEmails, outlookSentEmails])
 
   useEffect(() => {
     const providerEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
@@ -2942,7 +2949,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       }
 
       setGmailSentEmails((prev) => [gmailSentEmail, ...prev])
-      setSelectedSentEmailId(gmailSentEmail.id)
+      setSelectedSentEmailIds((prev) => ({ ...prev, gmail: gmailSentEmail.id }))
     } else {
       const token = await getMicrosoftSupabaseToken()
       if (!token) throw new Error('Missing Outlook token.')
@@ -2973,7 +2980,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       }
 
       setOutlookSentEmails((prev) => [sentEmail, ...prev])
-      setSelectedSentEmailId(sentEmail.id)
+      setSelectedSentEmailIds((prev) => ({ ...prev, outlook: sentEmail.id }))
 
       // If replying in a thread, show the sent reply immediately in the conversation
       if (data.conversationId) {
@@ -3500,8 +3507,10 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
             <SentPage
               gmailSentEmails={gmailSentEmails}
               outlookSentEmails={outlookSentEmails}
-              selectedSentEmailId={selectedSentEmailId}
-              onSelectSentEmail={setSelectedSentEmailId}
+              selectedSentEmailIds={selectedSentEmailIds}
+              onSelectSentEmail={(provider, emailId) => {
+                setSelectedSentEmailIds((prev) => ({ ...prev, [provider]: emailId }))
+              }}
               gmailEmails={gmailEmailState}
               outlookEmails={outlookEmailState}
               defaultProvider={activeProvider}
@@ -4531,7 +4540,7 @@ function DraftsPage({ gmailDrafts, outlookDrafts, connectedAccounts, defaultProv
   )
 }
 
-function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onSelectSentEmail, gmailEmails, outlookEmails, defaultProvider, connectedAccounts, onFetchSentDetail, onDownloadAttachment, outlookConversationMessages, loadingConversationIds, onLoadConversation }) {
+function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailIds, onSelectSentEmail, gmailEmails, outlookEmails, defaultProvider, connectedAccounts, onFetchSentDetail, onDownloadAttachment, outlookConversationMessages, loadingConversationIds, onLoadConversation }) {
   const [expandedSentThreadIds, setExpandedSentThreadIds] = useState(new Set())
   const [sentProvider, setSentProvider] = useState(() => {
     if (defaultProvider === 'outlook' && (outlookSentEmails?.length > 0 || connectedAccounts?.outlook)) return 'outlook'
@@ -4540,7 +4549,18 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onS
   const [detailCache, setDetailCache] = useState({})
   const sentEmails = sentProvider === 'gmail' ? (gmailSentEmails || []) : (outlookSentEmails || [])
   const showToggle = connectedAccounts?.gmail && connectedAccounts?.outlook
-  const selectedSentEmail = sentEmails.find((email) => email.id === selectedSentEmailId) || sentEmails[0]
+  const selectedSentEmailId = selectedSentEmailIds?.[sentProvider] || null
+  const outlookConversationEmailPool = sentProvider === 'outlook' && outlookConversationMessages
+    ? Array.from(outlookConversationMessages.values()).flat()
+    : []
+  const selectableSentEmails = sentProvider === 'outlook'
+    ? [...sentEmails, ...outlookConversationEmailPool]
+    : sentEmails
+  const selectedSentEmail = selectableSentEmails.find((email) => email.id === selectedSentEmailId) || sentEmails[0]
+
+  function handleSelectSentEmail(emailId) {
+    onSelectSentEmail(sentProvider, emailId)
+  }
 
   useEffect(() => {
     if (!selectedSentEmail || !onFetchSentDetail) return
@@ -4629,8 +4649,8 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onS
                     }`}
                     role="button"
                     tabIndex={0}
-                    onClick={() => onSelectSentEmail(latest.id)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSentEmail(latest.id) } }}
+                    onClick={() => handleSelectSentEmail(latest.id)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelectSentEmail(latest.id) } }}
                   >
                     {hasMultiple ? (
                       <button
@@ -4671,8 +4691,8 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onS
                           key={email.id}
                           role="button"
                           tabIndex={0}
-                          onClick={() => onSelectSentEmail(email.id)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSentEmail(email.id) } }}
+                          onClick={() => handleSelectSentEmail(email.id)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelectSentEmail(email.id) } }}
                           className={`flex items-start gap-2.5 pl-8 pr-4 py-2.5 border-b border-slate-100 border-l-2 border-l-indigo-100 cursor-pointer transition-colors ${
                             selectedSentEmail && selectedSentEmail.id === email.id ? 'bg-indigo-50/70' : 'bg-slate-50/40 hover:bg-slate-50'
                           }`}
@@ -4696,7 +4716,7 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailId, onS
             sentEmails.map((email) => (
               <button
                 key={email.id}
-                onClick={() => onSelectSentEmail(email.id)}
+                onClick={() => handleSelectSentEmail(email.id)}
                 className={`w-full text-left px-3.5 py-2.5 border-b border-slate-100 transition-colors cursor-pointer ${
                   selectedSentEmail && selectedSentEmail.id === email.id
                     ? 'bg-indigo-50/70'
