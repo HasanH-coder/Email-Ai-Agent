@@ -252,8 +252,6 @@ export default function App() {
 
         const session = data?.session ?? null
 
-        const isPageRefresh = sessionStorage.getItem('mailpilot.session_active') === 'true'
-
         if (session?.access_token && currentPath === '/auth/callback') {
           sessionStorage.setItem('mailpilot.session_active', 'true')
           setAuthSession(session)
@@ -263,23 +261,13 @@ export default function App() {
             window.history.replaceState({}, '', '/dashboard')
             setCurrentPage('dashboard')
           }
-        } else if (session?.access_token && isPageRefresh) {
-          // Page refresh — user was already logged in, restore their session
+        } else if (session?.access_token) {
+          // Restore any valid persisted Supabase session before deciding whether to redirect.
           setAuthSession(session)
           setStoredToken(session.access_token)
           await refreshConnectedAccountRows(supabase, session.user?.id)
           if (!cancelled && currentPath === '/dashboard') {
             setCurrentPage('dashboard')
-          }
-        } else if (session?.access_token) {
-          // New tab/browser with a stale cached session — sign out so the
-          // user always sees the login screen and must authenticate explicitly.
-          await supabase.auth.signOut()
-          if (!cancelled) {
-            clearStoredToken()
-            setAuthSession(null)
-            setAuthUser(null)
-            setConnectedAccountRows([])
           }
         } else if (currentPath === '/auth/callback' && authCode) {
           // The OAuth code was present but getSession() returned null — this happens when

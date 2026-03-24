@@ -19,6 +19,8 @@ const EMAIL_STORAGE_KEYS = {
   outlook: 'mailpilot:outlookEmails:v2',
 }
 
+const DASHBOARD_ACTIVE_PAGE_STORAGE_KEY = 'mailpilot.dashboard_active_page'
+const VALID_DASHBOARD_PAGES = new Set(['inbox', 'drafts', 'sent', 'settings'])
 
 const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
 
@@ -1592,7 +1594,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [selectedSentEmailIds, setSelectedSentEmailIds] = useState({ gmail: null, outlook: null })
   const [selectedEmailId, setSelectedEmailId] = useState(null)
   const [activeFilter, setActiveFilter] = useState('all')
-  const [activePage, setActivePage] = useState('inbox')
+  const [activePage, setActivePage] = useState(() => {
+    if (typeof window === 'undefined') return 'inbox'
+    const savedPage = window.sessionStorage.getItem(DASHBOARD_ACTIVE_PAGE_STORAGE_KEY)
+    return VALID_DASHBOARD_PAGES.has(savedPage) ? savedPage : 'inbox'
+  })
   const [activeProvider, setActiveProvider] = useState('gmail')
   const [searchQuery, setSearchQuery] = useState('')
   const [showSignOutModal, setShowSignOutModal] = useState(false)
@@ -1674,6 +1680,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     if (typeof window === 'undefined') return
     window.localStorage.setItem(EMAIL_STORAGE_KEYS.outlook, JSON.stringify(outlookEmailState))
   }, [outlookEmailState])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.sessionStorage.setItem(DASHBOARD_ACTIVE_PAGE_STORAGE_KEY, activePage)
+  }, [activePage])
 
   const getGoogleProviderToken = useCallback(async () => {
     const supabase = getSupabase()
