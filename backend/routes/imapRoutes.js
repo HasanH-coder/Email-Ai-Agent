@@ -307,14 +307,6 @@ router.post('/send', authMiddleware, async (req, res) => {
     return res.status(400).json({ message: 'SMTP not configured. Please reconnect your IMAP account with SMTP settings.' })
   }
 
-  const transporter = nodemailer.createTransport({
-    host: creds.smtp_host,
-    port: creds.smtp_port,
-    secure: creds.smtp_port === 465,
-    auth: { user: creds.email, pass: creds.password },
-    tls: { rejectUnauthorized: false },
-  })
-
   const mailOptions = {
     from: creds.email,
     to,
@@ -333,11 +325,64 @@ router.post('/send', authMiddleware, async (req, res) => {
     }))
   }
 
+  function buildSmtpTransporter(port) {
+    return nodemailer.createTransport({
+      host: creds.smtp_host,
+      port,
+      secure: port === 465,
+      requireTLS: port === 587,
+      auth: { user: creds.email, pass: creds.password },
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
+    })
+  }
+
+  const primaryPort = Number(creds.smtp_port) || 587
+  const fallbackPort = primaryPort === 465 ? 587 : primaryPort === 587 ? 465 : null
+
+  let smtpError = null
+  let sent = false
+
+  // Try primary port
   try {
-    await transporter.sendMail(mailOptions)
+    await buildSmtpTransporter(primaryPort).sendMail(mailOptions)
+    sent = true
   } catch (err) {
-    console.error('[imap] SMTP send failed:', err.message)
-    return res.status(500).json({ message: `Failed to send email: ${err.message}` })
+    smtpError = err
+    console.error('[imap] SMTP send failed on primary port', {
+      host: creds.smtp_host,
+      port: primaryPort,
+      code: err.code,
+      message: err.message,
+    })
+  }
+
+  // Try fallback port if primary failed
+  if (!sent && fallbackPort) {
+    try {
+      await buildSmtpTransporter(fallbackPort).sendMail(mailOptions)
+      sent = true
+      console.log(`[imap] SMTP succeeded on fallback port ${fallbackPort} (primary port ${primaryPort} failed: ${smtpError?.message})`)
+    } catch (fallbackErr) {
+      console.error('[imap] SMTP send also failed on fallback port', {
+        host: creds.smtp_host,
+        port: fallbackPort,
+        code: fallbackErr.code,
+        message: fallbackErr.message,
+      })
+      smtpError = new Error(
+        `Port ${primaryPort}: ${smtpError?.message} | Port ${fallbackPort}: ${fallbackErr.message}`
+      )
+    }
+  }
+
+  if (!sent) {
+    return res.status(500).json({
+      message: `Failed to send email via SMTP. ${smtpError?.message || 'Unknown error'}`,
+      smtp: { host: creds.smtp_host, port: primaryPort, fallbackPort },
+    })
   }
 
   // Respond immediately — the SMTP delivery is complete.
