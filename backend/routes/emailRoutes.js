@@ -1253,15 +1253,22 @@ router.get('/outlook', async (req, res, next) => {
 
   try {
     const maxResults = Math.min(Number(req.query.maxResults) || 25, 100)
-    const skipToken = typeof req.query.skipToken === 'string' ? req.query.skipToken : ''
-    const params = new URLSearchParams({
-      '$top': String(maxResults),
-      '$select': 'id,subject,from,receivedDateTime,bodyPreview,isRead,conversationId,flag,hasAttachments',
-      '$orderby': 'receivedDateTime desc',
-    })
-    if (skipToken) params.set('$skipToken', skipToken)
+    const nextPageUrl = typeof req.query.nextPageUrl === 'string' ? req.query.nextPageUrl : ''
 
-    const url = `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?${params.toString()}`
+    // When nextPageUrl is provided (from @odata.nextLink), use it directly — Graph encodes
+    // the full pagination state (sort order, cursor) into the URL, so re-constructing it
+    // from just the skip token breaks pagination.
+    let url
+    if (nextPageUrl && nextPageUrl.startsWith('https://graph.microsoft.com/')) {
+      url = nextPageUrl
+    } else {
+      const params = new URLSearchParams({
+        '$top': String(maxResults),
+        '$select': 'id,subject,from,receivedDateTime,bodyPreview,isRead,conversationId,flag,hasAttachments',
+        '$orderby': 'receivedDateTime desc',
+      })
+      url = `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?${params.toString()}`
+    }
 
     let data
     try {
@@ -1282,15 +1289,10 @@ router.get('/outlook', async (req, res, next) => {
     }
 
     const messages = Array.isArray(data.value) ? data.value : []
-    let nextSkipToken = null
-    const nextLink = data['@odata.nextLink'] || ''
-    if (nextLink) {
-      try { nextSkipToken = new URL(nextLink).searchParams.get('$skipToken') } catch {}
-    }
 
     return res.status(200).json({
       emails: messages.map(normalizeOutlookMessage),
-      nextSkipToken: nextSkipToken || null,
+      nextSkipToken: data['@odata.nextLink'] || null,
     })
   } catch (error) {
     if (error.graphError) {

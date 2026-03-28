@@ -1727,6 +1727,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [outlookHasMore, setOutlookHasMore] = useState(false)
   const [outlookNextSkipToken, setOutlookNextSkipToken] = useState(null)
   const [outlookInboxLoaded, setOutlookInboxLoaded] = useState(false)
+  const [outlookLoadingMore, setOutlookLoadingMore] = useState(false)
   const [outlookDetailLoadingId, setOutlookDetailLoadingId] = useState(null)
 
   // IMAP email state
@@ -2274,7 +2275,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
   }, [clearProviderReconnectRequired, getMicrosoftSupabaseToken, markProviderReconnectRequired])
 
-  const loadOutlookEmails = useCallback(async ({ skipToken = null, append = false, silent = false } = {}) => {
+  const loadOutlookEmails = useCallback(async ({ nextPageUrl = null, append = false, silent = false } = {}) => {
     if (outlookPageLoadRef.current) return
     if (!connectedAccounts.outlook) {
       setOutlookEmails([])
@@ -2294,18 +2295,18 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
 
     outlookPageLoadRef.current = true
-    if (!silent) {
+    if (append) {
+      setOutlookLoadingMore(true)
+    } else if (!silent) {
       setOutlookLoading(true)
-      if (!append) {
-        setOutlookInboxLoaded(false)
-        setOutlookNextSkipToken(null)
-        setOutlookHasMore(false)
-      }
+      setOutlookInboxLoaded(false)
+      setOutlookNextSkipToken(null)
+      setOutlookHasMore(false)
     }
 
     try {
       const params = new URLSearchParams({ maxResults: '25' })
-      if (skipToken) params.set('skipToken', skipToken)
+      if (nextPageUrl) params.set('nextPageUrl', nextPageUrl)
 
       const response = await fetch(`${BACKEND_URL}/api/emails/outlook?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -2327,14 +2328,15 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       clearProviderReconnectRequired('outlook')
       const newEmails = Array.isArray(responseData.emails) ? responseData.emails : []
       const normalizedEmails = newEmails.map(normalizeOutlookEmail)
-      const nextSkipToken = responseData.nextSkipToken || null
+      const nextPageUrlFromResponse = responseData.nextSkipToken || null
 
       setOutlookEmails((prev) => {
-        if (append || silent) return mergeEmailsById(prev, normalizedEmails)
+        if (append) return [...prev, ...normalizedEmails]
+        if (silent) return mergeEmailsById(prev, normalizedEmails)
         return normalizedEmails
       })
-      setOutlookNextSkipToken(nextSkipToken)
-      setOutlookHasMore(Boolean(nextSkipToken))
+      setOutlookNextSkipToken(nextPageUrlFromResponse)
+      setOutlookHasMore(Boolean(nextPageUrlFromResponse))
       setOutlookInboxLoaded(true)
     } catch (error) {
       console.error('Failed to load Outlook emails:', error)
@@ -2345,6 +2347,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     } finally {
       outlookPageLoadRef.current = false
       setOutlookLoading(false)
+      setOutlookLoadingMore(false)
     }
   }, [clearProviderReconnectRequired, connectedAccounts.outlook, getMicrosoftSupabaseToken, markProviderReconnectRequired])
 
@@ -2770,14 +2773,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   useEffect(() => {
     function refreshOutlookSync() {
-      if (outlookLoading) return
+      if (outlookLoading || outlookLoadingMore) return
       if (document.visibilityState === 'visible') {
         void loadOutlookEmails({ silent: true })
       }
     }
 
     const intervalId = window.setInterval(() => {
-      if (outlookLoading) return
+      if (outlookLoading || outlookLoadingMore) return
       if (activeProvider === 'outlook' && outlookHasMore) return
       if (document.visibilityState === 'visible') {
         void loadOutlookEmails({ silent: true })
@@ -2792,7 +2795,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       window.removeEventListener('focus', refreshOutlookSync)
       document.removeEventListener('visibilitychange', refreshOutlookSync)
     }
-  }, [activeProvider, outlookHasMore, outlookLoading, loadOutlookEmails])
+  }, [activeProvider, outlookHasMore, outlookLoading, outlookLoadingMore, loadOutlookEmails])
 
   useEffect(() => {
     let cancelled = false
@@ -3217,7 +3220,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }
 
   function handleOutlookListScroll(event) {
-    if (activeProvider !== 'outlook' || !outlookHasMore || outlookLoading || !outlookNextSkipToken) {
+    if (activeProvider !== 'outlook' || !outlookHasMore || outlookLoading || outlookLoadingMore || !outlookNextSkipToken) {
       return
     }
 
@@ -3225,16 +3228,16 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight
 
     if (distanceFromBottom < 160) {
-      void loadOutlookEmails({ skipToken: outlookNextSkipToken, append: true })
+      void loadOutlookEmails({ nextPageUrl: outlookNextSkipToken, append: true })
     }
   }
 
   function handleLoadMoreOutlookEmails() {
-    if (activeProvider !== 'outlook' || !outlookHasMore || outlookLoading || !outlookNextSkipToken) {
+    if (activeProvider !== 'outlook' || !outlookHasMore || outlookLoading || outlookLoadingMore || !outlookNextSkipToken) {
       return
     }
 
-    void loadOutlookEmails({ skipToken: outlookNextSkipToken, append: true })
+    void loadOutlookEmails({ nextPageUrl: outlookNextSkipToken, append: true })
   }
 
   function handleImapListScroll(event) {
@@ -3305,6 +3308,10 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       await connectImapAccount({ email, password, imapHost, imapPort, smtpHost, smtpPort })
       setConnectedAccounts((prev) => ({ ...prev, imap: true }))
       setConnectedEmails((prev) => ({ ...prev, imap: email }))
+      setFetchedConnectedAccountRows((prev) => [
+        ...prev.filter((r) => r.provider !== 'imap'),
+        { provider: 'imap', email },
+      ])
       setShowImapModal(false)
       setConnectActionError('')
       setActiveProvider('imap')
@@ -3541,6 +3548,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
       setImapSentEmails((prev) => [{ ...sentEmail, bodyLoaded: true }, ...prev])
       setSelectedSentEmailIds((prev) => ({ ...prev, imap: sentEmail.id }))
+      if (data.draftId) {
+        setImapDraftsEmails((prev) => prev.filter((d) => d.id !== data.draftId))
+        fetch(`${BACKEND_URL}/api/emails/imap/drafts/${data.draftId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch((err) => console.error('[imap] Failed to delete draft after send:', err.message))
+      }
     } else {
       const token = await getMicrosoftSupabaseToken()
       if (!token) throw new Error('Missing Outlook token.')
@@ -3705,7 +3719,30 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         draftId = responseData.id
         setGmailDrafts((prev) => [createdDraft, ...prev.filter((draft) => draft.id !== draftId)])
       } else if (payload.provider === 'imap') {
-        // IMAP replies are sent directly — no draft creation step
+        const token = await getGoogleProviderToken()
+        if (token) {
+          try {
+            const res = await fetch(`${BACKEND_URL}/api/emails/imap/drafts`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ to: payload.to, subject: payload.subject, body: payload.body }),
+            })
+            const resData = await res.json()
+            if (res.ok && resData.uid) {
+              draftId = String(resData.uid)
+              const createdDraft = normalizeImapDraftEmail({
+                id: draftId,
+                to: payload.to,
+                subject: payload.subject,
+                snippet: payload.body,
+                internalDate: Date.now(),
+              })
+              setImapDraftsEmails((prev) => [createdDraft, ...prev.filter((d) => d.id !== draftId)])
+            }
+          } catch (err) {
+            console.error('[imap] Failed to save draft:', err.message)
+          }
+        }
       } else {
         const responseData = await createOutlookDraft(payload)
         const createdDraft = normalizeOutlookDraft({
@@ -3729,7 +3766,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         threadRootId: payload.threadRootId,
         draftId,
       })
-      setAiActionMessage(payload.provider === 'imap' ? 'Email generated. Review and send below.' : 'Email generated and saved to Drafts.')
+      setAiActionMessage('Email generated and saved to Drafts.')
       setAiActionTone('success')
     } catch (error) {
       setAiActionMessage(error?.message || 'Failed to save draft.')
@@ -4105,6 +4142,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               gmailInboxLoaded={gmailInboxLoaded}
               gmailInboxFullyLoaded={gmailInboxFullyLoaded}
               outlookLoading={outlookLoading}
+              outlookLoadingMore={outlookLoadingMore}
               outlookHasMore={outlookHasMore}
               outlookInboxLoaded={outlookInboxLoaded}
               imapLoading={imapLoading}
@@ -4461,6 +4499,7 @@ function InboxPage({
   gmailInboxLoaded,
   gmailInboxFullyLoaded,
   outlookLoading,
+  outlookLoadingMore,
   outlookHasMore,
   outlookInboxLoaded,
   imapLoading,
@@ -4581,7 +4620,7 @@ function InboxPage({
     if (activeProvider === 'gmail') {
       if (!gmailInboxLoaded || !gmailHasMore || gmailLoading || gmailLoadingMore) return
     } else if (activeProvider === 'outlook') {
-      if (!outlookInboxLoaded || !outlookHasMore || outlookLoading) return
+      if (!outlookInboxLoaded || !outlookHasMore || outlookLoading || outlookLoadingMore) return
     } else if (activeProvider === 'imap') {
       if (!imapInboxLoaded || !imapHasMore || imapLoading || imapLoadingMore) return
     } else {
@@ -4594,7 +4633,7 @@ function InboxPage({
     if (listElement.scrollHeight <= listElement.clientHeight + 24) {
       onLoadMoreEmails()
     }
-  }, [activeProvider, emails.length, gmailHasMore, gmailInboxLoaded, gmailLoading, gmailLoadingMore, outlookHasMore, outlookInboxLoaded, outlookLoading, imapHasMore, imapInboxLoaded, imapLoading, imapLoadingMore, onLoadMoreEmails])
+  }, [activeProvider, emails.length, gmailHasMore, gmailInboxLoaded, gmailLoading, gmailLoadingMore, outlookHasMore, outlookInboxLoaded, outlookLoading, outlookLoadingMore, imapHasMore, imapInboxLoaded, imapLoading, imapLoadingMore, onLoadMoreEmails])
 
   return (
     <div className="flex h-full">
@@ -4906,6 +4945,11 @@ function InboxPage({
           {activeProvider === 'gmail' && gmailInboxLoaded && gmailInboxFullyLoaded && !gmailHasMore && emails.length > 0 && (
             <div className="px-4 py-3 text-center text-xs font-medium text-slate-300">
               End of inbox
+            </div>
+          )}
+          {activeProvider === 'outlook' && outlookLoadingMore && (
+            <div className="px-4 py-3 text-center text-xs font-medium text-slate-400">
+              Loading more emails...
             </div>
           )}
           {activeProvider === 'outlook' && outlookInboxLoaded && !outlookHasMore && emails.length > 0 && (
