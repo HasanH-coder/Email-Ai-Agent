@@ -2624,20 +2624,28 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }, [loadGmailEmails])
 
   useEffect(() => {
+    const GMAIL_POLL_INTERVAL_MS = 30000
+    const GMAIL_MIN_REFETCH_GAP_MS = 30000
+    let lastGmailFetchAt = 0
+
+    function canRefetchGmail() {
+      if (gmailLoading || gmailLoadingMore) return false
+      if (Date.now() - lastGmailFetchAt < GMAIL_MIN_REFETCH_GAP_MS) return false
+      return document.visibilityState === 'visible'
+    }
+
     function refreshGmailSync() {
-      if (gmailLoading || gmailLoadingMore) return
-      if (document.visibilityState === 'visible') {
-        void loadGmailEmails({ silent: true })
-      }
+      if (!canRefetchGmail()) return
+      lastGmailFetchAt = Date.now()
+      void loadGmailEmails({ silent: true })
     }
 
     const intervalId = window.setInterval(() => {
-      if (gmailLoading || gmailLoadingMore) return
       if (activeProvider === 'gmail' && gmailHasMore) return
-      if (document.visibilityState === 'visible') {
-        void loadGmailEmails({ silent: true })
-      }
-    }, 5000)
+      if (!canRefetchGmail()) return
+      lastGmailFetchAt = Date.now()
+      void loadGmailEmails({ silent: true })
+    }, GMAIL_POLL_INTERVAL_MS)
 
     window.addEventListener('focus', refreshGmailSync)
     document.addEventListener('visibilitychange', refreshGmailSync)
@@ -3696,6 +3704,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         })
         draftId = responseData.id
         setGmailDrafts((prev) => [createdDraft, ...prev.filter((draft) => draft.id !== draftId)])
+      } else if (payload.provider === 'imap') {
+        // IMAP replies are sent directly — no draft creation step
       } else {
         const responseData = await createOutlookDraft(payload)
         const createdDraft = normalizeOutlookDraft({
@@ -3719,7 +3729,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         threadRootId: payload.threadRootId,
         draftId,
       })
-      setAiActionMessage('Email generated and saved to Drafts.')
+      setAiActionMessage(payload.provider === 'imap' ? 'Email generated. Review and send below.' : 'Email generated and saved to Drafts.')
       setAiActionTone('success')
     } catch (error) {
       setAiActionMessage(error?.message || 'Failed to save draft.')

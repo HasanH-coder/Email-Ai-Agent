@@ -9,6 +9,7 @@ const router = express.Router()
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const PROVIDER_API_MAX_RETRIES = 2
 const PROVIDER_API_BASE_BACKOFF_MS = 250
+const PROVIDER_API_429_BACKOFF_MS = 10000
 const PROVIDER_API_TIMEOUT_MS = 15000
 
 function sleep(ms) {
@@ -134,7 +135,11 @@ async function performProviderFetch({
 
         if (attempt < PROVIDER_API_MAX_RETRIES && isTemporaryProviderError(error)) {
           logProviderRetry(provider, requestLabel, attempt + 1, error)
-          await sleep(PROVIDER_API_BASE_BACKOFF_MS * (2 ** attempt))
+          const retryAfterSec = response.headers.get('Retry-After')
+          const backoff = error.statusCode === 429
+            ? (retryAfterSec ? Number(retryAfterSec) * 1000 : PROVIDER_API_429_BACKOFF_MS * (attempt + 1))
+            : PROVIDER_API_BASE_BACKOFF_MS * (2 ** attempt)
+          await sleep(backoff)
           continue
         }
 
