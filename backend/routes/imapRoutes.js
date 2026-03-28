@@ -343,24 +343,40 @@ router.post('/send', authMiddleware, async (req, res) => {
   // Respond immediately — the SMTP delivery is complete.
   res.json({ ok: true })
 
-  // Append a copy to the Sent folder in the background (best-effort, non-fatal).
-  // Uses the connection pool so no new TCP handshake is needed if a connection is warm.
+  // Append a copy to the Sent folder using a dedicated one-off IMAP connection.
+  // A separate client avoids any state conflicts with the shared pool (e.g. INBOX
+  // being selected by a concurrent request). mailboxOpen() is called before append()
+  // so the server accepts the APPEND command regardless of prior mailbox state.
   const sentRaw = buildRawMimeMessage({
     from: creds.email, to, subject: subject || '(No Subject)', body,
     inReplyTo: inReplyTo || null, attachments,
   })
   setImmediate(async () => {
+    const appendClient = createImapClient({
+      host: creds.imap_host, port: creds.imap_port,
+      email: creds.email, password: creds.password,
+    })
     try {
-      await withImapConnection(creds, userId, async (client) => {
-        for (const folder of ['Sent', 'Sent Items', 'INBOX.Sent', '[Gmail]/Sent Mail']) {
-          try {
-            await client.append(folder, Buffer.from(sentRaw), ['\\Seen'])
-            break
-          } catch { continue }
+      await withTimeout(appendClient.connect(), IMAP_TIMEOUT_MS, 'Connection timed out.')
+      const sentFolders = ['Sent', 'Sent Items', 'INBOX.Sent', '[Gmail]/Sent Mail']
+      let appended = false
+      for (const folder of sentFolders) {
+        try {
+          await appendClient.mailboxOpen(folder)
+          await appendClient.append(folder, Buffer.from(sentRaw), ['\\Seen'])
+          appended = true
+          break
+        } catch {
+          continue
         }
-      })
-    } catch {
-      // Best-effort — log but don't crash the process
+      }
+      if (!appended) {
+        console.error('[imap] Could not append sent message — no writable Sent folder found. Tried:', sentFolders.join(', '))
+      }
+    } catch (err) {
+      console.error('[imap] Background Sent-folder append failed:', err.message)
+    } finally {
+      try { await appendClient.logout() } catch { try { appendClient.close() } catch {} }
     }
   })
 })
