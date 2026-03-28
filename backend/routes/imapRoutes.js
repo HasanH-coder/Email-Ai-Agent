@@ -325,64 +325,28 @@ router.post('/send', authMiddleware, async (req, res) => {
     }))
   }
 
-  function buildSmtpTransporter(port) {
-    return nodemailer.createTransport({
-      host: creds.smtp_host,
-      port,
-      secure: port === 465,
-      requireTLS: port === 587,
-      auth: { user: creds.email, pass: creds.password },
-      tls: { rejectUnauthorized: false },
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-    })
+  const brevoUser = process.env.BREVO_USER
+  const brevoApiKey = process.env.BREVO_API_KEY
+  if (!brevoUser || !brevoApiKey) {
+    return res.status(500).json({ message: 'SMTP relay not configured. BREVO_USER and BREVO_API_KEY must be set.' })
   }
 
-  const primaryPort = Number(creds.smtp_port) || 587
-  const fallbackPort = primaryPort === 465 ? 587 : primaryPort === 587 ? 465 : null
+  const transporter = nodemailer.createTransport({
+    host: 'smtp-relay.brevo.com',
+    port: 587,
+    secure: false,
+    auth: { user: brevoUser, pass: brevoApiKey },
+  })
 
-  let smtpError = null
-  let sent = false
-
-  // Try primary port
   try {
-    await buildSmtpTransporter(primaryPort).sendMail(mailOptions)
-    sent = true
+    await transporter.sendMail(mailOptions)
   } catch (err) {
-    smtpError = err
-    console.error('[imap] SMTP send failed on primary port', {
-      host: creds.smtp_host,
-      port: primaryPort,
+    console.error('[imap] Brevo SMTP send failed', {
       code: err.code,
       message: err.message,
+      from: creds.email,
     })
-  }
-
-  // Try fallback port if primary failed
-  if (!sent && fallbackPort) {
-    try {
-      await buildSmtpTransporter(fallbackPort).sendMail(mailOptions)
-      sent = true
-      console.log(`[imap] SMTP succeeded on fallback port ${fallbackPort} (primary port ${primaryPort} failed: ${smtpError?.message})`)
-    } catch (fallbackErr) {
-      console.error('[imap] SMTP send also failed on fallback port', {
-        host: creds.smtp_host,
-        port: fallbackPort,
-        code: fallbackErr.code,
-        message: fallbackErr.message,
-      })
-      smtpError = new Error(
-        `Port ${primaryPort}: ${smtpError?.message} | Port ${fallbackPort}: ${fallbackErr.message}`
-      )
-    }
-  }
-
-  if (!sent) {
-    return res.status(500).json({
-      message: `Failed to send email via SMTP. ${smtpError?.message || 'Unknown error'}`,
-      smtp: { host: creds.smtp_host, port: primaryPort, fallbackPort },
-    })
+    return res.status(500).json({ message: `Failed to send email: ${err.message}` })
   }
 
   // Respond immediately — the SMTP delivery is complete.
