@@ -20,7 +20,7 @@ export async function startGoogleConnect() {
   localStorage.setItem('mailpilot.oauth_provider_hint', 'gmail')
   localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'gmail')
   localStorage.setItem(CONNECTING_PROVIDER_STARTED_AT_KEY, String(Date.now()))
-  localStorage.setItem('mailpilot.last_login_provider', 'gmail')
+  localStorage.setItem('mailpilot.last_login_provider', JSON.stringify(['gmail']))
   if (typeof window !== 'undefined') {
     window.sessionStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'google')
   }
@@ -53,7 +53,7 @@ export async function startMicrosoftConnect(userInitiated = false) {
   localStorage.setItem('mailpilot.oauth_provider_hint', 'outlook')
   localStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
   localStorage.setItem(CONNECTING_PROVIDER_STARTED_AT_KEY, String(Date.now()))
-  localStorage.setItem('mailpilot.last_login_provider', 'outlook')
+  localStorage.setItem('mailpilot.last_login_provider', JSON.stringify(['outlook']))
   if (typeof window !== 'undefined') {
     window.sessionStorage.setItem(OAUTH_PROVIDER_HINT_STORAGE_KEY, 'outlook')
   }
@@ -100,4 +100,62 @@ export async function connectGmailViaBackend(supabaseToken) {
   }
   const { url } = await resp.json()
   window.location.href = url
+}
+
+// Test IMAP credentials against the server before saving.
+// Throws with a user-facing message if the connection fails.
+async function testImapConnection({ token, email, password, imapHost, imapPort }) {
+  const response = await fetch(`${BACKEND_URL}/api/emails/imap/test`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ email, password, imap_host: imapHost, imap_port: imapPort }),
+  })
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}))
+    throw new Error(
+      data.message || 'Could not connect to IMAP server. Please check your credentials and server settings.'
+    )
+  }
+}
+
+// Save IMAP credentials to the connected_accounts table for the currently authenticated user.
+// Tests the connection first — throws if credentials are invalid.
+export async function connectImapAccount({ email, password, imapHost, imapPort, smtpHost, smtpPort }) {
+  const supabase = getSupabase()
+  if (!supabase) throw new Error('Missing Supabase env vars.')
+
+  const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+  if (sessionError || !sessionData?.session) throw new Error('No authenticated session.')
+
+  const token = sessionData.session.access_token
+  const userId = sessionData.session.user?.id
+  if (!userId) throw new Error('Could not determine user ID.')
+
+  // Verify credentials are correct before persisting them
+  await testImapConnection({ token, email, password, imapHost, imapPort })
+
+  // Encode all credentials as JSON so provider_access_token is never null
+  // (the connected_accounts query filters .not('provider_access_token', 'is', null))
+  const credentialsJson = JSON.stringify({
+    password,
+    imap_host: imapHost,
+    imap_port: Number(imapPort),
+    smtp_host: smtpHost,
+    smtp_port: Number(smtpPort),
+  })
+
+  const { error } = await supabase
+    .from('connected_accounts')
+    .upsert(
+      [{ user_id: userId, provider: 'imap', email, provider_access_token: credentialsJson }],
+      { onConflict: 'user_id,provider,email' }
+    )
+
+  if (error) throw new Error(error.message || 'Failed to save IMAP account.')
+
+  return { email }
 }

@@ -1958,4 +1958,42 @@ router.patch('/outlook/:id/read', async (req, res, next) => {
   }
 })
 
+// DELETE /api/emails/gmail — disconnect Gmail account (removes row from connected_accounts)
+router.delete('/gmail', async (req, res) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const { error } = await supabaseAdmin
+    .from('connected_accounts')
+    .delete()
+    .eq('user_id', userId)
+    .eq('provider', 'gmail')
+
+  if (error) {
+    console.error('[gmail] Failed to delete account:', error.message)
+    return res.status(500).json({ message: 'Failed to disconnect Gmail account.' })
+  }
+
+  return res.json({ ok: true })
+})
+
+// DELETE /api/emails/outlook — disconnect Outlook account (removes row from connected_accounts)
+router.delete('/outlook', async (req, res) => {
+  const userId = await getUserIdFromSupabaseToken(req.headers.authorization)
+  if (!userId) return res.status(401).json({ message: 'Invalid authorization.' })
+
+  const { error } = await supabaseAdmin
+    .from('connected_accounts')
+    .delete()
+    .eq('user_id', userId)
+    .eq('provider', 'outlook')
+
+  if (error) {
+    console.error('[outlook] Failed to delete account:', error.message)
+    return res.status(500).json({ message: 'Failed to disconnect Outlook account.' })
+  }
+
+  return res.json({ ok: true })
+})
+
 module.exports = router

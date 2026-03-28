@@ -49,7 +49,33 @@ function writeProviderTokenStatus(provider, hasToken) {
 function normalizeConnectedProvider(provider) {
   if (provider === 'google' || provider === 'gmail') return 'gmail'
   if (provider === 'azure' || provider === 'microsoft' || provider === 'outlook') return 'outlook'
+  if (provider === 'imap') return 'imap'
   return null
+}
+
+// LAST_LOGIN_PROVIDER_KEY stores a JSON array of providers the user has explicitly
+// authenticated in this session (e.g. ["gmail"] or ["gmail","outlook"]).
+// Legacy format: plain string — handled transparently by readActiveProviders().
+function readActiveProviders() {
+  if (typeof window === 'undefined') return null
+  const raw = window.localStorage.getItem(LAST_LOGIN_PROVIDER_KEY)
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) return parsed
+    if (typeof parsed === 'string') return [parsed]
+  } catch {
+    // old plain-string value
+    return [raw]
+  }
+  return null
+}
+
+function addActiveProvider(provider) {
+  if (typeof window === 'undefined' || !provider) return
+  const current = readActiveProviders() || []
+  if (!current.includes(provider)) current.push(provider)
+  window.localStorage.setItem(LAST_LOGIN_PROVIDER_KEY, JSON.stringify(current))
 }
 
 function getBestIdentityEmail(user, normalizedProvider) {
@@ -157,14 +183,18 @@ export default function App() {
 
     let rows = Array.isArray(data) ? data : []
 
-    // If the user just completed a fresh OAuth login, only show that provider.
-    // This prevents a previously-connected second provider from auto-connecting.
-    // The flag is cleared when the user explicitly connects a second account.
-    const lastLoginProvider = localStorage.getItem(LAST_LOGIN_PROVIDER_KEY)
-    if (lastLoginProvider) {
-      rows = rows.filter(
-        (row) => normalizeConnectedProvider(row?.provider) === lastLoginProvider
-      )
+    // Only show providers the user has explicitly authenticated in this session.
+    // activeProviders is a JSON array (e.g. ["gmail"] or ["gmail","outlook"]).
+    // IMAP always passes — it is added explicitly from Settings, not via OAuth.
+    // When activeProviders is null (no key set), all rows pass (shouldn't happen
+    // in normal flow, but safe as a fallback for edge cases like direct URL access).
+    const activeProviders = readActiveProviders()
+    if (activeProviders) {
+      rows = rows.filter((row) => {
+        const normalized = normalizeConnectedProvider(row?.provider)
+        if (normalized === 'imap') return true
+        return activeProviders.includes(normalized)
+      })
     }
 
     const normalizedRows = rows
@@ -389,98 +419,104 @@ export default function App() {
       const providerHint = localStorage.getItem(OAUTH_PROVIDER_HINT_STORAGE_KEY)
       const startedAtRaw = localStorage.getItem(CONNECTING_PROVIDER_STARTED_AT_KEY)
       console.log('Reading oauth_provider_hint in saveConnectedAccount:', providerHint)
-      let shouldClearProviderIntent = Boolean(
-        providerHint || startedAtRaw || localStorage.getItem(CONNECTING_PROVIDER_KEY)
-      )
-      try {
-      if (!providerHint) {
-        return
-      }
+
+      if (!providerHint) return
 
       const startedAt = Number(startedAtRaw)
       if (!Number.isFinite(startedAt) || Date.now() - startedAt > CONNECTING_PROVIDER_MAX_AGE_MS) {
+        // Intent too old — clean up stale keys and bail
+        clearConnectingProviderIntent()
         return
       }
 
-      const { data, error } = await supabase.auth.getUser()
-      if (cancelled) return
+      try {
+        const { data, error } = await supabase.auth.getUser()
+        if (cancelled) return
 
-      if (error) {
-        console.error('Failed to get authenticated user:', error)
-        return
-      }
+        if (error) {
+          console.error('Failed to get authenticated user:', error)
+          return
+        }
 
-      const user = data?.user
-      if (!user?.id) return
+        const user = data?.user
+        if (!user?.id) return
 
-      if (providerHint !== 'gmail' && providerHint !== 'outlook') {
-        console.error('Invalid oauth_provider_hint. Skipping connected_accounts upsert.', providerHint)
-        return
-      }
-      const accountEmail = getBestIdentityEmail(user, providerHint) || ''
-      // Use authSession directly — it has the correct provider_token from the OAuth callback.
-      // Calling getSession() again can return a stale or different provider's token.
-      const accessToken = authSession?.provider_token
-      const refreshToken = authSession?.provider_refresh_token
+        if (providerHint !== 'gmail' && providerHint !== 'outlook') {
+          console.error('Invalid oauth_provider_hint. Skipping connected_accounts upsert.', providerHint)
+          clearConnectingProviderIntent()
+          return
+        }
 
-      if (!accessToken) {
-        console.info('[connected_accounts] skipping auth sync write without provider access token', {
-          codePath: 'frontend.auth.saveConnectedAccount',
+        const accountEmail = getBestIdentityEmail(user, providerHint) || ''
+        // Use authSession directly — it has the correct provider_token from the OAuth callback.
+        // Calling getSession() again can return a stale or different provider's token.
+        const accessToken = authSession?.provider_token
+        const refreshToken = authSession?.provider_refresh_token
+
+        if (!accessToken) {
+          // provider_token not yet available — do NOT clear the hint so this effect
+          // can retry on the next auth state change when the token arrives.
+          // This is the key fix for first-time users where Supabase delivers SIGNED_IN
+          // with provider_token=null and then fires a second event with the real token.
+          console.info('[connected_accounts] skipping auth sync write without provider access token — will retry', {
+            codePath: 'frontend.auth.saveConnectedAccount',
+            user_id: user.id,
+            provider: providerHint,
+            email: accountEmail || null,
+            next_access_token: summarizeTokenPresence(accessToken),
+            next_refresh_token: summarizeTokenPresence(refreshToken),
+          })
+          return
+        }
+
+        console.log('Connected account upsert payload:', {
+          userId: user.id,
+          email: user.email,
+          identities: user.identities,
+          provider: providerHint,
+        })
+
+        writeProviderTokenStatus(providerHint, true)
+
+        const payload = {
           user_id: user.id,
           provider: providerHint,
-          email: accountEmail || null,
-          next_access_token: summarizeTokenPresence(accessToken),
-          next_refresh_token: summarizeTokenPresence(refreshToken),
-        })
-        return
-      }
-
-      console.log('Connected account upsert payload:', {
-        userId: user.id,
-        email: user.email,
-        identities: user.identities,
-        provider: providerHint,
-      })
-
-      writeProviderTokenStatus(providerHint, true)
-
-      const payload = {
-        user_id: user.id,
-        provider: providerHint,
-        email: accountEmail,
-        provider_access_token: accessToken,
-      }
-
-      if (refreshToken) {
-        payload.provider_refresh_token = refreshToken
-      }
-
-      logConnectedAccountTokenWrite({
-        codePath: 'frontend.auth.saveConnectedAccount',
-        userId: user.id,
-        provider: providerHint,
-        email: accountEmail,
-        accessToken,
-        refreshToken,
-        accessTokenChanged: true,
-        refreshTokenChanged: Boolean(refreshToken),
-      })
-
-      const { error: upsertError } = await supabase
-        .from('connected_accounts')
-        .upsert([payload], { onConflict: 'user_id,provider,email' })
-
-      if (cancelled) return
-      if (upsertError) {
-        console.error('Failed to upsert connected account:', upsertError)
-        return
-      }
-
-      await refreshConnectedAccountRows(supabase, user.id)
-      } finally {
-        if (shouldClearProviderIntent) {
-          clearConnectingProviderIntent()
+          email: accountEmail,
+          provider_access_token: accessToken,
         }
+
+        if (refreshToken) {
+          payload.provider_refresh_token = refreshToken
+        }
+
+        logConnectedAccountTokenWrite({
+          codePath: 'frontend.auth.saveConnectedAccount',
+          userId: user.id,
+          provider: providerHint,
+          email: accountEmail,
+          accessToken,
+          refreshToken,
+          accessTokenChanged: true,
+          refreshTokenChanged: Boolean(refreshToken),
+        })
+
+        const { error: upsertError } = await supabase
+          .from('connected_accounts')
+          .upsert([payload], { onConflict: 'user_id,provider,email' })
+
+        if (cancelled) return
+        if (upsertError) {
+          console.error('Failed to upsert connected account:', upsertError)
+          return
+        }
+
+        await refreshConnectedAccountRows(supabase, user.id)
+        // Only clear the intent after a successful save so that transient failures
+        // (missing provider_token, network errors) can be retried automatically.
+        clearConnectingProviderIntent()
+      } catch (err) {
+        console.error('saveConnectedAccount unexpected error:', err)
+        // Do not clear intent — allow retry on next auth state change
       }
     }
 
@@ -557,8 +593,11 @@ export default function App() {
 
     if (connected) {
       // Google OAuth backend callback already stored the token — just refresh rows.
-      // Clear the login-provider lock so both accounts show now that a second is connected.
-      localStorage.removeItem(LAST_LOGIN_PROVIDER_KEY)
+      // Add this provider to the active set so it appears alongside the login provider.
+      const connectedProvider = normalizeConnectedProvider(connected)
+      if (connectedProvider && connectedProvider !== 'imap') {
+        addActiveProvider(connectedProvider)
+      }
       const supabase = getSupabase()
       if (supabase) refreshConnectedAccountRows(supabase, authSession.user?.id)
       return
@@ -573,8 +612,8 @@ export default function App() {
       } catch { /* ignore */ }
 
       if (provider === 'outlook') {
-        // Clear the login-provider lock so both accounts show now that a second is connected.
-        localStorage.removeItem(LAST_LOGIN_PROVIDER_KEY)
+        // Add Outlook to the active set so it appears alongside the login provider.
+        addActiveProvider('outlook')
         fetch(`${BACKEND_URL}/api/auth/microsoft/exchange`, {
           method: 'POST',
           headers: {

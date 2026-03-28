@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { startGoogleConnect, startMicrosoftConnect, connectOutlookViaBackend, connectGmailViaBackend } from './services/connect'
+import { startGoogleConnect, startMicrosoftConnect, connectOutlookViaBackend, connectGmailViaBackend, connectImapAccount } from './services/connect'
+import ImapConnectForm from './ImapConnectForm'
 import { getSupabase } from './services/supabaseClient'
 
 
@@ -27,6 +28,7 @@ const OAUTH_PROVIDER_HINT_STORAGE_KEY = 'mailpilot.oauth_provider_hint'
 function mapOauthProviderToMailbox(provider) {
   if (provider === 'google' || provider === 'gmail') return 'gmail'
   if (provider === 'azure' || provider === 'outlook') return 'outlook'
+  if (provider === 'imap') return 'imap'
   return null
 }
 
@@ -46,8 +48,8 @@ function writeProviderTokenStatus(provider, hasToken) {
 }
 
 function getConnectedAccountState(rows) {
-  const nextConnectedAccounts = { gmail: false, outlook: false }
-  const nextConnectedEmails = { gmail: '', outlook: '' }
+  const nextConnectedAccounts = { gmail: false, outlook: false, imap: false }
+  const nextConnectedEmails = { gmail: '', outlook: '', imap: '' }
 
   for (const account of rows ?? []) {
     const mailboxProvider = mapOauthProviderToMailbox(account?.provider)
@@ -62,6 +64,7 @@ function getConnectedAccountState(rows) {
 function getFirstConnectedProvider(connectedAccounts) {
   if (connectedAccounts.gmail) return 'gmail'
   if (connectedAccounts.outlook) return 'outlook'
+  if (connectedAccounts.imap) return 'imap'
   return null
 }
 
@@ -217,6 +220,72 @@ function normalizeOutlookEmail(email) {
   }
 }
 
+function normalizeImapEmail(email) {
+  const sender = email.fromName || email.fromEmail || email.from || 'Unknown Sender'
+  const senderEmail = email.fromEmail || ''
+  const internalDate = email.internalDate || (email.date ? String(new Date(email.date).getTime()) : null)
+  const { time, date } = formatEmailTimestamp(internalDate, email.date || '')
+
+  return {
+    id: email.id,
+    sender,
+    email: senderEmail,
+    subject: email.subject || '(No Subject)',
+    preview: email.snippet || email.bodyText || '',
+    bodyText: email.bodyText || email.snippet || '',
+    bodyHtml: email.bodyHtml || '',
+    time,
+    date,
+    internalDate,
+    read: Boolean(email.read),
+    starred: Boolean(email.starred),
+    avatar: getAvatarFromSender(sender),
+    avatarColor: 'bg-indigo-500',
+    provider: 'imap',
+    pinned: Boolean(email.starred), // \Flagged flag = pinned for IMAP
+    bodyLoaded: false, // always fetch full body on selection
+    hasAttachments: false,
+    attachments: [],
+  }
+}
+
+function normalizeImapSentEmail(email) {
+  const { time } = formatEmailTimestamp(
+    email.internalDate || (email.date ? String(new Date(email.date).getTime()) : null),
+    email.date || ''
+  )
+  return {
+    id: email.id,
+    from: email.from || email.fromEmail || '',
+    fromEmail: email.fromEmail || '',
+    fromName: email.fromName || '',
+    to: email.to || '',
+    subject: email.subject || '(No Subject)',
+    body: email.snippet || email.bodyText || '',
+    time,
+    date: email.date || '',
+    internalDate: email.internalDate || (email.date ? String(new Date(email.date).getTime()) : ''),
+    provider: 'imap',
+    hasAttachments: false,
+    attachments: [],
+  }
+}
+
+function normalizeImapDraftEmail(email) {
+  const { time } = formatEmailTimestamp(
+    email.internalDate || (email.date ? String(new Date(email.date).getTime()) : null),
+    email.date || ''
+  )
+  return {
+    id: email.id,
+    to: email.to || '',
+    subject: email.subject || '(No Subject)',
+    body: email.snippet || email.bodyText || '',
+    time,
+    provider: 'imap',
+  }
+}
+
 function groupOutlookEmailsByThread(emails) {
   const threadMap = new Map()
   const threadOrder = []
@@ -312,6 +381,25 @@ function buildEmailHtmlDocument(bodyHtml = '') {
       }
       a {
         color: #2563eb;
+      }
+      @media (max-width: 640px) {
+        html, body {
+          max-width: 100%;
+          overflow-x: hidden;
+        }
+        body {
+          word-wrap: break-word;
+          overflow-wrap: break-word;
+        }
+        img {
+          max-width: 100% !important;
+          height: auto !important;
+        }
+        table {
+          max-width: 100% !important;
+          overflow-x: auto;
+          display: block;
+        }
       }
     </style>
   </head>
@@ -704,6 +792,27 @@ function AttachmentFileIcon({ mimeType = '' }) {
 }
 
 
+
+// --- Email List Skeleton ---
+function EmailListSkeleton({ count = 8 }) {
+  return (
+    <div>
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="flex items-start gap-3 px-4 py-3.5 border-b border-slate-50 animate-pulse">
+          <div className="w-9 h-9 rounded-full bg-slate-200 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0 space-y-2 pt-0.5">
+            <div className="flex items-center gap-2">
+              <div className="h-3 bg-slate-200 rounded w-28" />
+              <div className="h-3 bg-slate-200 rounded w-10 ml-auto" />
+            </div>
+            <div className="h-3 bg-slate-200 rounded w-40" />
+            <div className="h-3 bg-slate-100 rounded w-full" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 // --- Reusable Confirm Modal ---
 function ConfirmModal({ isOpen, title, message, confirmLabel, confirmClass, onCancel, onConfirm }) {
@@ -1620,13 +1729,30 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const [outlookInboxLoaded, setOutlookInboxLoaded] = useState(false)
   const [outlookDetailLoadingId, setOutlookDetailLoadingId] = useState(null)
 
+  // IMAP email state
+  const [imapEmails, setImapEmails] = useState([])
+  const [imapLoading, setImapLoading] = useState(false)
+  const [imapLoadingMore, setImapLoadingMore] = useState(false)
+  const [imapHasMore, setImapHasMore] = useState(false)
+  const [imapInboxLoaded, setImapInboxLoaded] = useState(false)
+  const imapPageLoadRef = useRef(false)
+  const [imapDetailLoadingId, setImapDetailLoadingId] = useState(null)
+  const imapDetailLoadRef = useRef(new Set())
+  const [imapSentEmails, setImapSentEmails] = useState([])
+  const [imapSentHasMore, setImapSentHasMore] = useState(false)
+  const [imapSentLoadingMore, setImapSentLoadingMore] = useState(false)
+  const [imapDraftsEmails, setImapDraftsEmails] = useState([])
+
   // Settings state
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('mailpilot:darkMode') === 'true')
   const [signature, setSignature] = useState('')
   const [useSignature, setUseSignature] = useState(true)
-  const [connectedAccounts, setConnectedAccounts] = useState({ gmail: false, outlook: false })
-  const [connectedEmails, setConnectedEmails] = useState({ gmail: '', outlook: '' })
-  const [reconnectRequiredProviders, setReconnectRequiredProviders] = useState({ gmail: false, outlook: false })
+  const [connectedAccounts, setConnectedAccounts] = useState({ gmail: false, outlook: false, imap: false })
+  const [connectedEmails, setConnectedEmails] = useState({ gmail: '', outlook: '', imap: '' })
+  const [reconnectRequiredProviders, setReconnectRequiredProviders] = useState({ gmail: false, outlook: false, imap: false })
+  const [showImapModal, setShowImapModal] = useState(false)
+  const [imapModalLoading, setImapModalLoading] = useState(false)
+  const [imapModalError, setImapModalError] = useState('')
   const [fetchedConnectedAccountRows, setFetchedConnectedAccountRows] = useState([])
   const [accountsLoading, setAccountsLoading] = useState(true)
 
@@ -1653,14 +1779,15 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   const outlookPageLoadRef = useRef(false)
   const outlookDetailLoadRef = useRef(new Set())
 
-  const currentEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
-  const currentDrafts = activeProvider === 'gmail' ? gmailDrafts : outlookDrafts
-  const currentSentEmails = activeProvider === 'gmail' ? gmailSentEmails : outlookSentEmails
-  const setCurrentEmails = activeProvider === 'gmail' ? setGmailEmails : setOutlookEmails
+  const currentEmails = activeProvider === 'gmail' ? gmailEmailState : activeProvider === 'outlook' ? outlookEmailState : imapEmails
+  const currentDrafts = activeProvider === 'gmail' ? gmailDrafts : activeProvider === 'outlook' ? outlookDrafts : []
+  const currentSentEmails = activeProvider === 'gmail' ? gmailSentEmails : activeProvider === 'outlook' ? outlookSentEmails : []
+  const setCurrentEmails = activeProvider === 'gmail' ? setGmailEmails : activeProvider === 'outlook' ? setOutlookEmails : setImapEmails
   const selectedEmail = currentEmails.find((e) => e.id === selectedEmailId) ?? null
   const selectedEmailDetailLoading =
     (activeProvider === 'gmail' && gmailDetailLoadingId === selectedEmail?.id) ||
-    (activeProvider === 'outlook' && outlookDetailLoadingId === selectedEmail?.id)
+    (activeProvider === 'outlook' && outlookDetailLoadingId === selectedEmail?.id) ||
+    (activeProvider === 'imap' && imapDetailLoadingId === selectedEmail?.id)
 
   const effectiveConnectedAccountRows = Array.isArray(connectedAccountRows)
     ? connectedAccountRows
@@ -1994,12 +2121,29 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     return data?.session?.access_token || null
   }, [])
 
-  const handleDownloadAttachment = useCallback(async (emailId, attachmentId, filename, provider) => {
+  const handleDownloadAttachment = useCallback(async (emailId, attachmentId, filename, provider, context = 'inbox') => {
     try {
       if (provider === 'gmail') {
         const token = await getGoogleProviderToken()
         if (!token) return
         const res = await fetch(`${BACKEND_URL}/api/emails/gmail/${emailId}/attachments/${attachmentId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!res.ok) return
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        a.click()
+        URL.revokeObjectURL(url)
+      } else if (provider === 'imap') {
+        const token = await getGoogleProviderToken()
+        if (!token) return
+        const endpoint = context === 'sent'
+          ? `${BACKEND_URL}/api/emails/imap/sent/${emailId}/attachments/${attachmentId}`
+          : `${BACKEND_URL}/api/emails/imap/${emailId}/attachments/${attachmentId}`
+        const res = await fetch(endpoint, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) return
@@ -2204,6 +2348,134 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
   }, [clearProviderReconnectRequired, connectedAccounts.outlook, getMicrosoftSupabaseToken, markProviderReconnectRequired])
 
+  const loadImapEmails = useCallback(async ({ append = false, skip = 0, silent = false } = {}) => {
+    if (imapPageLoadRef.current) return
+    if (!connectedAccounts.imap) {
+      setImapEmails([])
+      setImapHasMore(false)
+      setImapInboxLoaded(false)
+      return
+    }
+
+    imapPageLoadRef.current = true
+    if (append) {
+      setImapLoadingMore(true)
+    } else if (!silent) {
+      setImapLoading(true)
+      setImapInboxLoaded(false)
+      setImapHasMore(false)
+    }
+
+    const token = await getGoogleProviderToken() // reuses Supabase JWT — same as Gmail/Outlook
+    if (!token) {
+      imapPageLoadRef.current = false
+      setImapLoading(false)
+      setImapLoadingMore(false)
+      if (!silent) {
+        setImapEmails([])
+        setImapHasMore(false)
+        setImapInboxLoaded(false)
+      }
+      return
+    }
+
+    try {
+      const params = new URLSearchParams({ skip: String(skip) })
+      const response = await fetch(`${BACKEND_URL}/api/emails/imap?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const responseData = await response.json()
+
+      if (!response.ok) {
+        console.error('Failed to load IMAP emails:', responseData)
+        if (!append && !silent) {
+          setImapEmails([])
+          setImapInboxLoaded(false)
+        }
+        return
+      }
+
+      const newEmails = Array.isArray(responseData.emails) ? responseData.emails : []
+      const normalized = newEmails.map(normalizeImapEmail)
+      setImapEmails((prev) => {
+        if (append) return [...prev, ...normalized]
+        if (silent) return mergeEmailsById(prev, normalized)
+        return normalized
+      })
+      setImapHasMore(Boolean(responseData.hasMore))
+      setImapInboxLoaded(true)
+    } catch (error) {
+      console.error('Failed to load IMAP emails:', error)
+      if (!append && !silent) {
+        setImapEmails([])
+        setImapInboxLoaded(false)
+      }
+    } finally {
+      imapPageLoadRef.current = false
+      setImapLoading(false)
+      setImapLoadingMore(false)
+    }
+  }, [connectedAccounts.imap, getGoogleProviderToken])
+
+  const loadMoreImapEmails = useCallback(async () => {
+    if (imapLoadingMore || !imapHasMore) return
+    void loadImapEmails({ append: true, skip: imapEmails.length })
+  }, [imapLoadingMore, imapHasMore, imapEmails.length, loadImapEmails])
+
+  const fetchImapEmailDetail = useCallback(async (emailId) => {
+    if (!emailId || imapDetailLoadRef.current.has(emailId)) return
+
+    const token = await getGoogleProviderToken()
+    if (!token) return
+
+    imapDetailLoadRef.current.add(emailId)
+    setImapDetailLoadingId(emailId)
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/emails/imap/${emailId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) return
+      const data = await response.json()
+      const fetchedAttachments = Array.isArray(data.attachments) ? data.attachments : []
+      setImapEmails((prev) =>
+        prev.map((e) =>
+          e.id === emailId
+            ? {
+                ...e,
+                bodyText: data.bodyText || e.bodyText,
+                bodyHtml: data.bodyHtml || e.bodyHtml,
+                bodyLoaded: true,
+                attachments: fetchedAttachments.length > 0 ? fetchedAttachments : e.attachments,
+                hasAttachments: fetchedAttachments.length > 0 || e.hasAttachments,
+              }
+            : e
+        )
+      )
+    } catch (err) {
+      console.error('[imap] Failed to fetch email detail:', err.message)
+    } finally {
+      imapDetailLoadRef.current.delete(emailId)
+      setImapDetailLoadingId((cur) => (cur === emailId ? null : cur))
+    }
+  }, [getGoogleProviderToken])
+
+  // Bug 2 fix: immediately syncs \Seen flag to the IMAP server so Outlook
+  // and other clients reflect the read state without delay.
+  const markImapEmailReadState = useCallback(async (emailId, read) => {
+    const token = await getGoogleProviderToken()
+    if (!token || !emailId) return
+    try {
+      await fetch(`${BACKEND_URL}/api/emails/imap/${emailId}/read`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ read }),
+      })
+    } catch (error) {
+      console.error('[imap] Failed to sync read flag:', error)
+    }
+  }, [getGoogleProviderToken])
+
   const fetchOutlookEmailDetail = useCallback(async (emailId) => {
     if (!emailId || outlookDetailLoadRef.current.has(emailId)) return
 
@@ -2245,6 +2517,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         const token = await getGoogleProviderToken()
         if (!token) return null
         const response = await fetch(`${BACKEND_URL}/api/emails/gmail/${emailId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!response.ok) return null
+        return await response.json()
+      } else if (provider === 'imap') {
+        const token = await getGoogleProviderToken()
+        if (!token) return null
+        const response = await fetch(`${BACKEND_URL}/api/emails/imap/sent/${emailId}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!response.ok) return null
@@ -2372,6 +2652,113 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   useEffect(() => {
     loadOutlookEmails()
   }, [loadOutlookEmails])
+
+  // Poll IMAP inbox every 30 seconds for new emails (same pattern as Gmail, slower interval).
+  useEffect(() => {
+    if (!connectedAccounts.imap) return
+
+    function refreshImapSync() {
+      if (imapLoading || imapLoadingMore) return
+      if (document.visibilityState === 'visible') {
+        void loadImapEmails({ silent: true })
+      }
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (imapLoading || imapLoadingMore) return
+      if (document.visibilityState === 'visible') {
+        void loadImapEmails({ silent: true })
+      }
+    }, 30000)
+
+    window.addEventListener('focus', refreshImapSync)
+    document.addEventListener('visibilitychange', refreshImapSync)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refreshImapSync)
+      document.removeEventListener('visibilitychange', refreshImapSync)
+    }
+  }, [connectedAccounts.imap, imapLoading, imapLoadingMore, loadImapEmails])
+
+  // Load IMAP emails when the tab becomes active or the account is first connected.
+  // imapInboxLoaded is the cache flag — once loaded, switching tabs does not re-fetch.
+  useEffect(() => {
+    if (activeProvider === 'imap' && connectedAccounts.imap && !imapInboxLoaded) {
+      loadImapEmails()
+    }
+  }, [activeProvider, connectedAccounts.imap, imapInboxLoaded, loadImapEmails])
+
+  // Load IMAP sent emails when the IMAP account is connected
+  useEffect(() => {
+    let cancelled = false
+    async function loadImapSent() {
+      if (!connectedAccounts.imap) {
+        if (!cancelled) { setImapSentEmails([]); setImapSentHasMore(false) }
+        return
+      }
+      const token = await getGoogleProviderToken()
+      if (!token) { if (!cancelled) { setImapSentEmails([]); setImapSentHasMore(false) } return }
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/emails/imap/sent`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (cancelled) return
+        if (res.ok && Array.isArray(data.emails)) {
+          setImapSentEmails(data.emails.map(normalizeImapSentEmail))
+          setImapSentHasMore(Boolean(data.hasMore))
+        } else {
+          setImapSentEmails([])
+          setImapSentHasMore(false)
+        }
+      } catch { if (!cancelled) { setImapSentEmails([]); setImapSentHasMore(false) } }
+    }
+    loadImapSent()
+    return () => { cancelled = true }
+  }, [connectedAccounts.imap, getGoogleProviderToken])
+
+  const loadMoreImapSent = useCallback(async () => {
+    if (imapSentLoadingMore || !imapSentHasMore) return
+    const token = await getGoogleProviderToken()
+    if (!token) return
+    setImapSentLoadingMore(true)
+    try {
+      const skip = imapSentEmails.length
+      const res = await fetch(`${BACKEND_URL}/api/emails/imap/sent?skip=${skip}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (res.ok && Array.isArray(data.emails)) {
+        setImapSentEmails((prev) => [...prev, ...data.emails.map(normalizeImapSentEmail)])
+        setImapSentHasMore(Boolean(data.hasMore))
+      }
+    } catch (err) {
+      console.error('[imap] Failed to load more sent emails:', err.message)
+    } finally {
+      setImapSentLoadingMore(false)
+    }
+  }, [imapSentLoadingMore, imapSentHasMore, imapSentEmails.length, getGoogleProviderToken])
+
+  // Load IMAP drafts when the IMAP account is connected
+  useEffect(() => {
+    let cancelled = false
+    async function loadImapDrafts() {
+      if (!connectedAccounts.imap) { if (!cancelled) setImapDraftsEmails([]); return }
+      const token = await getGoogleProviderToken()
+      if (!token) { if (!cancelled) setImapDraftsEmails([]); return }
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/emails/imap/drafts`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (cancelled) return
+        setImapDraftsEmails(res.ok && Array.isArray(data.emails) ? data.emails.map(normalizeImapDraftEmail) : [])
+      } catch { if (!cancelled) setImapDraftsEmails([]) }
+    }
+    loadImapDrafts()
+    return () => { cancelled = true }
+  }, [connectedAccounts.imap, getGoogleProviderToken])
 
   useEffect(() => {
     function refreshOutlookSync() {
@@ -2638,13 +3025,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }, [gmailSentEmails, outlookSentEmails])
 
   useEffect(() => {
-    const providerEmails = activeProvider === 'gmail' ? gmailEmailState : outlookEmailState
+    const providerEmails = activeProvider === 'gmail' ? gmailEmailState : activeProvider === 'outlook' ? outlookEmailState : imapEmails
 
     const hasSelectedEmail = providerEmails.some((email) => email.id === selectedEmailId)
     if (!hasSelectedEmail) {
       setSelectedEmailId(null)
     }
-  }, [activeProvider, connectedAccounts, gmailEmailState, outlookEmailState, selectedEmailId])
+  }, [activeProvider, connectedAccounts, gmailEmailState, outlookEmailState, imapEmails, selectedEmailId])
 
   function handleSelectEmail(id) {
     setSelectedEmailId(id)
@@ -2675,6 +3062,14 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       if (!selectedOutlookEmail || !selectedOutlookEmail.bodyLoaded) {
         void fetchOutlookEmailDetail(id)
       }
+    } else if (activeProvider === 'imap') {
+      const selectedImapEmail = imapEmails.find((email) => email.id === id)
+      if (selectedImapEmail && !selectedImapEmail.bodyLoaded) {
+        void fetchImapEmailDetail(id)
+      }
+      if (selectedImapEmail && !selectedImapEmail.read) {
+        void markImapEmailReadState(id, true)
+      }
     }
   }
 
@@ -2691,6 +3086,28 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
   async function handleTogglePin(id, e) {
     if (e) e.stopPropagation()
+
+    // IMAP: toggle \Flagged flag and sync to the real IMAP server
+    if (activeProvider === 'imap') {
+      const email = imapEmails.find((em) => em.id === id)
+      if (!email) return
+      const nowPinned = !email.pinned
+      setImapEmails((prev) => prev.map((em) => (em.id === id ? { ...em, pinned: nowPinned } : em)))
+      try {
+        const token = await getGoogleProviderToken()
+        if (!token) throw new Error('No token')
+        const res = await fetch(`${BACKEND_URL}/api/emails/imap/${id}/pin`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned: nowPinned }),
+        })
+        if (!res.ok) throw new Error('Pin failed')
+      } catch {
+        setImapEmails((prev) => prev.map((em) => (em.id === id ? { ...em, pinned: !nowPinned } : em)))
+      }
+      return
+    }
+
     const email = outlookEmailState.find((em) => em.id === id)
     if (!email) return
     const nowPinned = !email.pinned
@@ -2745,6 +3162,18 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }
 
   function handleProviderSwitch(provider) {
+    if (provider === 'imap') {
+      if (!connectedAccounts.imap) {
+        setShowImapModal(true)
+        return
+      }
+      setActiveProvider('imap')
+      setSelectedEmailId(null)
+      setActiveFilter('all')
+      setMobileShowDetail(false)
+      return
+    }
+
     const providerEmails = provider === 'gmail' ? gmailEmailState : outlookEmailState
 
     if (!connectedAccounts[provider] && providerEmails.length === 0) {
@@ -2800,6 +3229,19 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     void loadOutlookEmails({ skipToken: outlookNextSkipToken, append: true })
   }
 
+  function handleImapListScroll(event) {
+    if (activeProvider !== 'imap' || !imapHasMore || imapLoading || imapLoadingMore) return
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget
+    if (scrollHeight - scrollTop - clientHeight < 160) {
+      void loadMoreImapEmails()
+    }
+  }
+
+  function handleLoadMoreImapEmails() {
+    if (activeProvider !== 'imap' || !imapHasMore || imapLoading || imapLoadingMore) return
+    void loadMoreImapEmails()
+  }
+
   function handleConnect(provider, email) {
     writeProviderTokenStatus(provider, true)
     clearProviderReconnectRequired(provider)
@@ -2816,6 +3258,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   }
 
   async function handleConnectStart(provider) {
+    if (provider === 'imap') {
+      setShowImapModal(true)
+      return
+    }
+
     clearProviderReconnectRequired(provider)
     setConnectActionError('')
     try {
@@ -2843,22 +3290,118 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     }
   }
 
-  function handleDisconnect(provider) {
+  async function handleImapModalConnect({ email, password, imapHost, imapPort, smtpHost, smtpPort }) {
+    setImapModalLoading(true)
+    setImapModalError('')
+    try {
+      await connectImapAccount({ email, password, imapHost, imapPort, smtpHost, smtpPort })
+      setConnectedAccounts((prev) => ({ ...prev, imap: true }))
+      setConnectedEmails((prev) => ({ ...prev, imap: email }))
+      setShowImapModal(false)
+      setConnectActionError('')
+      setActiveProvider('imap')
+      setSelectedEmailId(null)
+      setActiveFilter('all')
+      setMobileShowDetail(false)
+    } catch (err) {
+      setImapModalError(err.message || 'Failed to connect IMAP account.')
+    } finally {
+      setImapModalLoading(false)
+    }
+  }
+
+  async function handleDisconnect(provider) {
     writeProviderTokenStatus(provider, false)
     clearProviderReconnectRequired(provider)
     setConnectedAccounts((prev) => ({ ...prev, [provider]: false }))
     setConnectedEmails((prev) => ({ ...prev, [provider]: '' }))
+    if (provider === 'gmail') {
+      setGmailEmails([])
+      setGmailDrafts([])
+      setGmailSentEmails([])
+      setGmailInboxLoaded(false)
+      setGmailInboxFullyLoaded(false)
+      gmailPageLoadRef.current = false
+      gmailDetailLoadRef.current.clear()
+      try {
+        const token = await getGoogleProviderToken()
+        if (token) {
+          await fetch(`${BACKEND_URL}/api/emails/gmail`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        }
+      } catch (err) {
+        console.error('[gmail] Failed to delete account row:', err.message)
+      }
+    }
+    if (provider === 'outlook') {
+      setOutlookEmails([])
+      setOutlookDrafts([])
+      setOutlookSentEmails([])
+      setOutlookInboxLoaded(false)
+      outlookPageLoadRef.current = false
+      outlookDetailLoadRef.current.clear()
+      try {
+        const token = await getGoogleProviderToken()
+        if (token) {
+          await fetch(`${BACKEND_URL}/api/emails/outlook`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        }
+      } catch (err) {
+        console.error('[outlook] Failed to delete account row:', err.message)
+      }
+    }
+    if (provider === 'imap') {
+      setImapEmails([])
+      setImapHasMore(false)
+      setImapLoadingMore(false)
+      setImapDetailLoadingId(null)
+      imapDetailLoadRef.current.clear()
+      setImapSentEmails([])
+      setImapSentHasMore(false)
+      setImapDraftsEmails([])
+      setImapInboxLoaded(false)
+      imapPageLoadRef.current = false
+      try {
+        const supabase = getSupabase()
+        const { data: sessionData } = await supabase.auth.getSession()
+        const token = sessionData?.session?.access_token
+        if (token) {
+          await fetch(`${BACKEND_URL}/api/emails/imap`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        }
+      } catch (err) {
+        console.error('[imap] Failed to delete account row:', err.message)
+      }
+    }
     if (activeProvider === provider) {
-      const other = provider === 'gmail' ? 'outlook' : 'gmail'
-      if (connectedAccounts[other]) {
-        setActiveProvider(other)
+      const fallback = provider === 'gmail' ? 'outlook' : provider === 'outlook' ? 'gmail' : 'gmail'
+      if (connectedAccounts[fallback]) {
+        setActiveProvider(fallback)
         setSelectedEmailId(null)
       }
     }
   }
 
   async function handleDeleteDraft(id) {
-    if (activeProvider === 'gmail') {
+    const isImapDraft = imapDraftsEmails.some((d) => d.id === id)
+    const isGmailDraft = gmailDrafts.some((d) => d.id === id)
+
+    if (isImapDraft) {
+      const token = await getGoogleProviderToken()
+      if (token) {
+        await fetch(`${BACKEND_URL}/api/emails/imap/drafts/${id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      }
+      setImapDraftsEmails((prev) => prev.filter((d) => d.id !== id))
+    } else if (isGmailDraft) {
       await deleteGmailDraft(id)
       setGmailDrafts((prev) => prev.filter((d) => d.id !== id))
     } else {
@@ -2871,7 +3414,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
   async function handleSaveDraft(data) {
     if (!editingDraft) return
 
-    if (activeProvider === 'gmail') {
+    if (editingDraft.provider === 'imap') {
+      // IMAP doesn't support updating drafts in-place — just close the modal
+      setEditingDraft(null)
+      return
+    }
+
+    if (editingDraft.provider === 'gmail' || activeProvider === 'gmail') {
       await updateGmailDraft(editingDraft.id, data)
       const nextDraft = {
         id: editingDraft.id,
@@ -2961,6 +3510,29 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
 
       setGmailSentEmails((prev) => [gmailSentEmail, ...prev])
       setSelectedSentEmailIds((prev) => ({ ...prev, gmail: gmailSentEmail.id }))
+    } else if (provider === 'imap') {
+      const token = await getGoogleProviderToken()
+      if (!token) throw new Error('Missing IMAP token.')
+
+      // Resolve the replyToId: ComposeModal doesn't forward initialData.replyToId, so fall back to editingDraft
+      const replyInReplyTo = data.replyToId || (editingDraft?._isReply ? editingDraft.replyToId : null) || null
+
+      const response = await fetch(`${BACKEND_URL}/api/emails/imap/send`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: sentEmail.to,
+          subject: sentEmail.subject,
+          body: sentEmail.body,
+          inReplyTo: replyInReplyTo,
+          attachments: Array.isArray(data.attachments) ? data.attachments : [],
+        }),
+      })
+      const responseData = await response.json()
+      if (!response.ok) throw new Error(responseData.message || 'Failed to send IMAP email.')
+
+      setImapSentEmails((prev) => [{ ...sentEmail, bodyLoaded: true }, ...prev])
+      setSelectedSentEmailIds((prev) => ({ ...prev, imap: sentEmail.id }))
     } else {
       const token = await getMicrosoftSupabaseToken()
       if (!token) throw new Error('Missing Outlook token.')
@@ -3044,6 +3616,8 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
     if (data.draftId) {
       if (provider === 'gmail') {
         setGmailDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
+      } else if (provider === 'imap') {
+        setImapDraftsEmails((prev) => prev.filter((d) => d.id !== data.draftId))
       } else {
         setOutlookDrafts((prev) => prev.filter((d) => d.id !== data.draftId))
       }
@@ -3155,11 +3729,53 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
       return
     }
 
+    if (activeProvider === 'imap') {
+      // Open compose modal pre-filled with reply data (quoted original below)
+      const replySubject = selectedEmail.subject?.startsWith('Re:')
+        ? selectedEmail.subject
+        : `Re: ${selectedEmail.subject || ''}`
+      const originalBody = selectedEmail.bodyText || selectedEmail.preview || ''
+      const quotedBody = originalBody
+        ? `\n\n--- Original Message ---\nFrom: ${selectedEmail.from || selectedEmail.fromEmail || ''}\nDate: ${selectedEmail.date || ''}\n\n${originalBody}`
+        : ''
+      setEditingDraft({
+        id: null,
+        to: selectedEmail.fromEmail || selectedEmail.from || '',
+        subject: replySubject,
+        body: quotedBody,
+        provider: 'imap',
+        _isReply: true,
+        replyToId: selectedEmail.id,
+      })
+      setShowComposeModal(true)
+      return
+    }
+
+    // Gmail / Outlook: use the inline AI reply panel
     setAiGeneratedEmail('')
     setAiGeneratedMeta(null)
     setAiPrompt('')
     setAiActionMessage(`Reply mode enabled for "${selectedEmail.subject}". Tell the AI what you want to say, then click Generate.`)
     setAiActionTone('success')
+  }
+
+  function handleForwardSelectedEmail() {
+    if (!selectedEmail || activeProvider !== 'imap') return
+    const fwdSubject = selectedEmail.subject?.startsWith('Fwd:')
+      ? selectedEmail.subject
+      : `Fwd: ${selectedEmail.subject || ''}`
+    const originalBody = selectedEmail.bodyText || selectedEmail.preview || ''
+    const forwardedBody = originalBody
+      ? `\n\n--- Forwarded Message ---\nFrom: ${selectedEmail.from || selectedEmail.fromEmail || ''}\nDate: ${selectedEmail.date || ''}\nSubject: ${selectedEmail.subject || ''}\n\n${originalBody}`
+      : ''
+    setEditingDraft({
+      id: null,
+      to: '',
+      subject: fwdSubject,
+      body: forwardedBody,
+      provider: 'imap',
+    })
+    setShowComposeModal(true)
   }
 
   function handleInboxPromptChange(value) {
@@ -3448,6 +4064,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               onToggleStar={handleToggleStar}
               onTogglePin={handleTogglePin}
               onReplyEmail={handleReplySelectedEmail}
+              onForwardEmail={handleForwardSelectedEmail}
               threadReplies={selectedThreadReplies}
               aiPrompt={aiPrompt}
               setAiPrompt={handleInboxPromptChange}
@@ -3470,9 +4087,13 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               outlookLoading={outlookLoading}
               outlookHasMore={outlookHasMore}
               outlookInboxLoaded={outlookInboxLoaded}
+              imapLoading={imapLoading}
+              imapLoadingMore={imapLoadingMore}
+              imapHasMore={imapHasMore}
+              imapInboxLoaded={imapInboxLoaded}
               selectedEmailDetailLoading={selectedEmailDetailLoading}
-              onEmailListScroll={activeProvider === 'outlook' ? handleOutlookListScroll : handleGmailListScroll}
-              onLoadMoreEmails={activeProvider === 'outlook' ? handleLoadMoreOutlookEmails : handleLoadMoreGmailEmails}
+              onEmailListScroll={activeProvider === 'imap' ? handleImapListScroll : activeProvider === 'outlook' ? handleOutlookListScroll : handleGmailListScroll}
+              onLoadMoreEmails={activeProvider === 'imap' ? handleLoadMoreImapEmails : activeProvider === 'outlook' ? handleLoadMoreOutlookEmails : handleLoadMoreGmailEmails}
               onGenerateRequest={handleInboxGenerate}
               onDirectSendRequest={handleRequestDirectSend}
               onSendGeneratedRequest={handleSendGeneratedFromExpanded}
@@ -3489,11 +4110,30 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
             <DraftsPage
               gmailDrafts={gmailDrafts}
               outlookDrafts={outlookDrafts}
+              imapDrafts={imapDraftsEmails}
               connectedAccounts={connectedAccounts}
               defaultProvider={activeProvider}
               onDeleteRequest={(id) => setDeletingDraftId(id)}
-              onEditRequest={(draft) => {
-                setEditingDraft(draft)
+              onEditRequest={async (draft) => {
+                if (draft.provider === 'imap') {
+                  // Fetch full body before opening compose
+                  const token = await getGoogleProviderToken()
+                  let fullBody = draft.body || ''
+                  if (token) {
+                    try {
+                      const res = await fetch(`${BACKEND_URL}/api/emails/imap/drafts/${draft.id}`, {
+                        headers: { Authorization: `Bearer ${token}` },
+                      })
+                      if (res.ok) {
+                        const data = await res.json()
+                        fullBody = data.bodyText || data.bodyHtml || draft.body || ''
+                      }
+                    } catch {}
+                  }
+                  setEditingDraft({ ...draft, body: fullBody })
+                } else {
+                  setEditingDraft(draft)
+                }
                 setShowComposeModal(true)
               }}
             />
@@ -3518,6 +4158,10 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
             <SentPage
               gmailSentEmails={gmailSentEmails}
               outlookSentEmails={outlookSentEmails}
+              imapSentEmails={imapSentEmails}
+              imapSentHasMore={imapSentHasMore}
+              imapSentLoadingMore={imapSentLoadingMore}
+              onLoadMoreImapSent={loadMoreImapSent}
               selectedSentEmailIds={selectedSentEmailIds}
               onSelectSentEmail={(provider, emailId) => {
                 setSelectedSentEmailIds((prev) => ({ ...prev, [provider]: emailId }))
@@ -3564,7 +4208,7 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         isOpen={disconnectModal.open}
         title="Disconnect account?"
         message={`Are you sure you want to disconnect ${
-          disconnectModal.provider === 'gmail' ? 'Gmail' : disconnectModal.provider === 'outlook' ? 'Outlook' : 'this account'
+          disconnectModal.provider === 'gmail' ? 'Gmail' : disconnectModal.provider === 'outlook' ? 'Outlook' : disconnectModal.provider === 'imap' ? 'your IMAP account' : 'this account'
         }?`}
         confirmLabel="Disconnect"
         confirmClass="text-white bg-red-600 hover:bg-red-700"
@@ -3672,6 +4316,40 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
               setAiActionMessage('Draft saved to Outlook.')
               setAiActionTone('success')
             }
+          } else if (activeProvider === 'imap') {
+            if (hasDraftContent && !draftData?.draftId) {
+              // New draft — APPEND to server Drafts folder
+              const token = await getGoogleProviderToken()
+              if (token) {
+                try {
+                  const response = await fetch(`${BACKEND_URL}/api/emails/imap/drafts`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ to: draftData.to, subject: draftData.subject, body: draftData.body }),
+                  })
+                  if (response.ok) {
+                    const responseData = await response.json()
+                    const newDraft = {
+                      id: responseData.uid ? String(responseData.uid) : String(Date.now()),
+                      to: draftData.to || '',
+                      subject: draftData.subject || '(No Subject)',
+                      body: draftData.body || '',
+                      provider: 'imap',
+                      time: new Date().toISOString(),
+                      date: new Date().toISOString(),
+                      internalDate: String(Date.now()),
+                      from: '',
+                      fromName: 'Draft',
+                      fromEmail: '',
+                      snippet: (draftData.body || '').slice(0, 100),
+                      read: true,
+                      starred: false,
+                    }
+                    setImapDraftsEmails((prev) => [newDraft, ...prev])
+                  }
+                } catch { /* non-fatal */ }
+              }
+            }
           }
 
           setShowComposeModal(false)
@@ -3692,6 +4370,33 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
         onCancel={() => setConnectModal({ open: false, provider: null, fromInbox: false })}
         onConnect={(email) => handleConnect(connectModal.provider, email)}
       />
+
+      {/* IMAP Connect Modal */}
+      {showImapModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md relative overflow-hidden animate-[fadeScaleIn_0.2s_ease-out]">
+            <button
+              onClick={() => { setShowImapModal(false); setImapModalError('') }}
+              className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer z-10"
+              aria-label="Close"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <div className="p-8">
+              <h2 className="text-base font-bold text-slate-900 mb-1">Connect with Email (IMAP)</h2>
+              <p className="text-xs text-slate-500 mb-5">Enter your email server credentials to connect.</p>
+              <ImapConnectForm
+                onConnect={handleImapModalConnect}
+                onCancel={() => { setShowImapModal(false); setImapModalError('') }}
+                loading={imapModalLoading}
+                error={imapModalError}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes fadeScaleIn {
@@ -3715,6 +4420,7 @@ function InboxPage({
   onToggleStar,
   onTogglePin,
   onReplyEmail,
+  onForwardEmail,
   threadReplies,
   aiPrompt,
   setAiPrompt,
@@ -3737,6 +4443,10 @@ function InboxPage({
   outlookLoading,
   outlookHasMore,
   outlookInboxLoaded,
+  imapLoading,
+  imapLoadingMore,
+  imapHasMore,
+  imapInboxLoaded,
   selectedEmailDetailLoading,
   onEmailListScroll,
   onLoadMoreEmails,
@@ -3764,7 +4474,7 @@ function InboxPage({
     onReplyAttachmentsChange?.(replyAttachments)
   }, [replyAttachments, onReplyAttachmentsChange])
   const emailListRef = useRef(null)
-  const groupedEmails = activeProvider === 'gmail' ? groupEmailsByDate(emails) : []
+  const groupedEmails = (activeProvider === 'gmail' || activeProvider === 'imap') ? groupEmailsByDate(emails) : []
   const outlookThreads = activeProvider === 'outlook' ? groupOutlookEmailsByThread(emails) : []
   const groupedOutlookThreads = activeProvider === 'outlook' ? groupOutlookThreadsByDate(outlookThreads) : []
 
@@ -3852,6 +4562,8 @@ function InboxPage({
       if (!gmailInboxLoaded || !gmailHasMore || gmailLoading || gmailLoadingMore) return
     } else if (activeProvider === 'outlook') {
       if (!outlookInboxLoaded || !outlookHasMore || outlookLoading) return
+    } else if (activeProvider === 'imap') {
+      if (!imapInboxLoaded || !imapHasMore || imapLoading || imapLoadingMore) return
     } else {
       return
     }
@@ -3862,7 +4574,7 @@ function InboxPage({
     if (listElement.scrollHeight <= listElement.clientHeight + 24) {
       onLoadMoreEmails()
     }
-  }, [activeProvider, emails.length, gmailHasMore, gmailInboxLoaded, gmailLoading, gmailLoadingMore, outlookHasMore, outlookInboxLoaded, outlookLoading, onLoadMoreEmails])
+  }, [activeProvider, emails.length, gmailHasMore, gmailInboxLoaded, gmailLoading, gmailLoadingMore, outlookHasMore, outlookInboxLoaded, outlookLoading, imapHasMore, imapInboxLoaded, imapLoading, imapLoadingMore, onLoadMoreEmails])
 
   return (
     <div className="flex h-full">
@@ -3907,6 +4619,22 @@ function InboxPage({
                 <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
               )}
             </button>
+
+            {connectedAccounts.imap && (
+              <button
+                onClick={() => onProviderSwitch('imap')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+                  activeProvider === 'imap'
+                    ? 'bg-white text-slate-900 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                <svg className="w-4 h-4 text-slate-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                </svg>
+                IMAP
+              </button>
+            )}
           </div>
         </div>
 
@@ -3933,16 +4661,14 @@ function InboxPage({
           className="flex-1 overflow-y-auto"
           onScroll={onEmailListScroll}
         >
-          {accountsLoading || (activeProvider === 'gmail' && gmailLoading) || (activeProvider === 'outlook' && outlookLoading) ? (
-            <div className="flex flex-col items-center justify-center h-full text-slate-400 py-12">
-              <p className="text-sm font-medium">Loading...</p>
-            </div>
+          {accountsLoading || (activeProvider === 'gmail' && gmailLoading) || (activeProvider === 'outlook' && outlookLoading) || (activeProvider === 'imap' && imapLoading) ? (
+            <EmailListSkeleton />
           ) : emails.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-slate-400 py-12">
               <InboxIcon className="w-10 h-10 mb-3" />
               <p className="text-sm font-medium">No emails found</p>
             </div>
-          ) : activeProvider === 'gmail' ? (
+          ) : (activeProvider === 'gmail' || activeProvider === 'imap') ? (
             groupedEmails.map((group) => (
               <div key={group.label}>
                 <div className="sticky top-0 z-10 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400 bg-white/95 backdrop-blur border-b border-slate-100">
@@ -3989,18 +4715,27 @@ function InboxPage({
                       </p>
                       <p className="text-xs text-slate-400 truncate">{email.preview}</p>
                     </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onToggleStar(email.id, e)
-                      }}
-                      className={`shrink-0 mt-1 cursor-pointer transition-colors ${
-                        email.starred ? 'text-amber-400' : 'text-slate-300 hover:text-amber-400'
-                      }`}
-                      aria-label={email.starred ? 'Unstar' : 'Star'}
-                    >
-                      <StarIcon className="w-4 h-4" filled={email.starred} />
-                    </button>
+                    {email.provider === 'imap' ? (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onTogglePin(email.id, e) }}
+                        className={`shrink-0 mt-1 cursor-pointer transition-colors ${
+                          email.pinned ? 'text-indigo-500' : 'text-slate-300 hover:text-indigo-400'
+                        }`}
+                        aria-label={email.pinned ? 'Unpin' : 'Pin'}
+                      >
+                        <PinIcon className="w-4 h-4" filled={email.pinned} />
+                      </button>
+                    ) : (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onToggleStar(email.id, e) }}
+                        className={`shrink-0 mt-1 cursor-pointer transition-colors ${
+                          email.starred ? 'text-amber-400' : 'text-slate-300 hover:text-amber-400'
+                        }`}
+                        aria-label={email.starred ? 'Unstar' : 'Star'}
+                      >
+                        <StarIcon className="w-4 h-4" filled={email.starred} />
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -4158,6 +4893,16 @@ function InboxPage({
               End of inbox
             </div>
           )}
+          {activeProvider === 'imap' && imapLoadingMore && (
+            <div className="px-4 py-3 text-center text-xs font-medium text-slate-400">
+              Loading more emails...
+            </div>
+          )}
+          {activeProvider === 'imap' && imapInboxLoaded && !imapHasMore && emails.length > 0 && (
+            <div className="px-4 py-3 text-center text-xs font-medium text-slate-300">
+              End of inbox
+            </div>
+          )}
         </div>
       </div>
 
@@ -4181,7 +4926,7 @@ function InboxPage({
                     <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
                   </svg>
                 </button>
-                {selectedEmail.provider === 'gmail' ? (
+                {(selectedEmail.provider === 'gmail' || selectedEmail.provider === 'imap') ? (
                   <GmailAvatar
                     sender={selectedEmail.sender}
                     senderEmail={selectedEmail.email}
@@ -4210,6 +4955,18 @@ function InboxPage({
                   >
                     <ReplyIcon className="w-4 h-4" />
                   </button>
+                  {activeProvider === 'imap' && onForwardEmail && (
+                    <button
+                      onClick={onForwardEmail}
+                      className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 transition-colors cursor-pointer"
+                      aria-label="Forward"
+                      title="Forward"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </button>
+                  )}
                   <button
                     onClick={() => onTogglePin(selectedEmail.id)}
                     className={`w-8 h-8 inline-flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
@@ -4463,13 +5220,16 @@ function InboxPage({
 
 
 // --- Drafts Page ---
-function DraftsPage({ gmailDrafts, outlookDrafts, connectedAccounts, defaultProvider, onDeleteRequest, onEditRequest }) {
+function DraftsPage({ gmailDrafts, outlookDrafts, imapDrafts, connectedAccounts, defaultProvider, onDeleteRequest, onEditRequest }) {
   const [draftsProvider, setDraftsProvider] = useState(() => {
+    if (defaultProvider === 'imap' && connectedAccounts?.imap) return 'imap'
     if (defaultProvider === 'outlook' && (outlookDrafts?.length > 0 || connectedAccounts?.outlook)) return 'outlook'
     return 'gmail'
   })
-  const showToggle = connectedAccounts?.gmail && connectedAccounts?.outlook
-  const drafts = draftsProvider === 'gmail' ? (gmailDrafts || []) : (outlookDrafts || [])
+  const showToggle = (connectedAccounts?.gmail || connectedAccounts?.outlook) && connectedAccounts?.imap
+    ? true
+    : connectedAccounts?.gmail && connectedAccounts?.outlook
+  const drafts = draftsProvider === 'gmail' ? (gmailDrafts || []) : draftsProvider === 'outlook' ? (outlookDrafts || []) : (imapDrafts || [])
 
   return (
     <div className="h-full overflow-y-auto bg-white">
@@ -4484,24 +5244,39 @@ function DraftsPage({ gmailDrafts, outlookDrafts, connectedAccounts, defaultProv
 
         {showToggle && (
           <div className="flex items-center gap-2 mb-6">
-            <button
-              onClick={() => setDraftsProvider('gmail')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${draftsProvider === 'gmail' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-            >
-              <svg className="w-4 h-4 text-red-500 shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" />
-              </svg>
-              Gmail
-            </button>
-            <button
-              onClick={() => setDraftsProvider('outlook')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${draftsProvider === 'outlook' ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-            >
-              <svg className="w-4 h-4 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M24 7.387v10.478c0 .23-.08.427-.24.59a.802.802 0 01-.59.239h-1.54V9.5l-9.63 6.131L2.37 9.5v9.194H.83a.802.802 0 01-.59-.24A.804.804 0 010 17.865V7.387c0-.332.12-.613.36-.843.24-.23.52-.344.84-.344h.1l10.33 6.573 10.33-6.573h.1c.32 0 .6.115.84.344.24.23.36.511.36.843z" />
-              </svg>
-              Outlook
-            </button>
+            {connectedAccounts?.gmail && (
+              <button
+                onClick={() => setDraftsProvider('gmail')}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${draftsProvider === 'gmail' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              >
+                <svg className="w-4 h-4 text-red-500 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" />
+                </svg>
+                Gmail
+              </button>
+            )}
+            {connectedAccounts?.outlook && (
+              <button
+                onClick={() => setDraftsProvider('outlook')}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${draftsProvider === 'outlook' ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              >
+                <svg className="w-4 h-4 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M24 7.387v10.478c0 .23-.08.427-.24.59a.802.802 0 01-.59.239h-1.54V9.5l-9.63 6.131L2.37 9.5v9.194H.83a.802.802 0 01-.59-.24A.804.804 0 010 17.865V7.387c0-.332.12-.613.36-.843.24-.23.52-.344.84-.344h.1l10.33 6.573 10.33-6.573h.1c.32 0 .6.115.84.344.24.23.36.511.36.843z" />
+                </svg>
+                Outlook
+              </button>
+            )}
+            {connectedAccounts?.imap && (
+              <button
+                onClick={() => setDraftsProvider('imap')}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer ${draftsProvider === 'imap' ? 'bg-slate-200 text-slate-800 border border-slate-300' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              >
+                <svg className="w-4 h-4 text-slate-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                </svg>
+                IMAP
+              </button>
+            )}
           </div>
         )}
 
@@ -4551,15 +5326,16 @@ function DraftsPage({ gmailDrafts, outlookDrafts, connectedAccounts, defaultProv
   )
 }
 
-function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailIds, onSelectSentEmail, gmailEmails, outlookEmails, defaultProvider, connectedAccounts, onFetchSentDetail, onDownloadAttachment, outlookConversationMessages, loadingConversationIds, onLoadConversation }) {
+function SentPage({ gmailSentEmails, outlookSentEmails, imapSentEmails, imapSentHasMore, imapSentLoadingMore, onLoadMoreImapSent, selectedSentEmailIds, onSelectSentEmail, gmailEmails, outlookEmails, defaultProvider, connectedAccounts, onFetchSentDetail, onDownloadAttachment, outlookConversationMessages, loadingConversationIds, onLoadConversation }) {
   const [expandedSentThreadIds, setExpandedSentThreadIds] = useState(new Set())
   const [sentProvider, setSentProvider] = useState(() => {
+    if (defaultProvider === 'imap' && connectedAccounts?.imap) return 'imap'
     if (defaultProvider === 'outlook' && (outlookSentEmails?.length > 0 || connectedAccounts?.outlook)) return 'outlook'
     return 'gmail'
   })
   const [detailCache, setDetailCache] = useState({})
-  const sentEmails = sentProvider === 'gmail' ? (gmailSentEmails || []) : (outlookSentEmails || [])
-  const showToggle = connectedAccounts?.gmail && connectedAccounts?.outlook
+  const sentEmails = sentProvider === 'gmail' ? (gmailSentEmails || []) : sentProvider === 'outlook' ? (outlookSentEmails || []) : (imapSentEmails || [])
+  const showToggle = [connectedAccounts?.gmail, connectedAccounts?.outlook, connectedAccounts?.imap].filter(Boolean).length > 1
   const selectedSentEmailId = selectedSentEmailIds?.[sentProvider] || null
   const outlookConversationEmailPool = sentProvider === 'outlook' && outlookConversationMessages
     ? Array.from(outlookConversationMessages.values()).flat()
@@ -4620,20 +5396,35 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailIds, on
           </div>
           {showToggle && (
             <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
-              <button
-                onClick={() => setSentProvider('gmail')}
-                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'gmail' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-              >
-                <svg className="w-4 h-4 text-red-500 shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" /></svg>
-                Gmail
-              </button>
-              <button
-                onClick={() => setSentProvider('outlook')}
-                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'outlook' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-              >
-                <svg className="w-4 h-4 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M24 7.387v10.478c0 .23-.08.424-.238.576-.16.154-.352.23-.578.23h-8.26v-6.08L16.91 14l1.957-1.41v-2.534l-1.957 1.38L12.924 8.6V7.157h10.26c.226 0 .418.08.578.233.158.152.238.35.238.576v-.58zM14.078 5.07v14.64L0 17.488V3.293l14.078 1.778zm-2.89 4.252c-.533-.754-1.268-1.13-2.206-1.13-.918 0-1.654.386-2.2 1.16-.55.773-.822 1.772-.822 2.997 0 1.174.264 2.127.793 2.86.53.734 1.248 1.1 2.157 1.1.963 0 1.72-.37 2.27-1.113.55-.743.823-1.733.823-2.97 0-1.28-.272-2.284-.816-3.018v.114zm-1.16 5.057c-.267.477-.648.716-1.143.716-.486 0-.87-.245-1.15-.735-.28-.49-.42-1.14-.42-1.948 0-.84.14-1.506.42-1.998.282-.49.67-.737 1.168-.737.483 0 .863.24 1.142.72.278.48.418 1.142.418 1.985 0 .844-.145 1.52-.435 1.997z" /></svg>
-                Outlook
-              </button>
+              {connectedAccounts?.gmail && (
+                <button
+                  onClick={() => setSentProvider('gmail')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'gmail' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  <svg className="w-4 h-4 text-red-500 shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" /></svg>
+                  Gmail
+                </button>
+              )}
+              {connectedAccounts?.outlook && (
+                <button
+                  onClick={() => setSentProvider('outlook')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'outlook' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  <svg className="w-4 h-4 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M24 7.387v10.478c0 .23-.08.424-.238.576-.16.154-.352.23-.578.23h-8.26v-6.08L16.91 14l1.957-1.41v-2.534l-1.957 1.38L12.924 8.6V7.157h10.26c.226 0 .418.08.578.233.158.152.238.35.238.576v-.58zM14.078 5.07v14.64L0 17.488V3.293l14.078 1.778zm-2.89 4.252c-.533-.754-1.268-1.13-2.206-1.13-.918 0-1.654.386-2.2 1.16-.55.773-.822 1.772-.822 2.997 0 1.174.264 2.127.793 2.86.53.734 1.248 1.1 2.157 1.1.963 0 1.72-.37 2.27-1.113.55-.743.823-1.733.823-2.97 0-1.28-.272-2.284-.816-3.018v.114zm-1.16 5.057c-.267.477-.648.716-1.143.716-.486 0-.87-.245-1.15-.735-.28-.49-.42-1.14-.42-1.948 0-.84.14-1.506.42-1.998.282-.49.67-.737 1.168-.737.483 0 .863.24 1.142.72.278.48.418 1.142.418 1.985 0 .844-.145 1.52-.435 1.997z" /></svg>
+                  Outlook
+                </button>
+              )}
+              {connectedAccounts?.imap && (
+                <button
+                  onClick={() => setSentProvider('imap')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${sentProvider === 'imap' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  <svg className="w-4 h-4 text-slate-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                  </svg>
+                  IMAP
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -4724,29 +5515,42 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailIds, on
               )
             })
           ) : (
-            sentEmails.map((email) => (
-              <button
-                key={email.id}
-                onClick={() => handleSelectSentEmail(email.id)}
-                className={`w-full text-left px-3.5 py-2.5 border-b border-slate-100 transition-colors cursor-pointer ${
-                  selectedSentEmail && selectedSentEmail.id === email.id
-                    ? 'bg-indigo-50/70'
-                    : 'hover:bg-slate-50'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <p className="text-sm font-semibold text-slate-900 truncate">To: {email.to}</p>
-                  <div className="flex items-center gap-1.5 shrink-0 ml-3">
-                    {(email.hasAttachments || email.attachments?.length > 0) && (
-                      <PaperclipIcon className="w-3 h-3 text-slate-400" />
-                    )}
-                    <span className="text-xs text-slate-400">{email.time}</span>
+            <>
+              {sentEmails.map((email) => (
+                <button
+                  key={email.id}
+                  onClick={() => handleSelectSentEmail(email.id)}
+                  className={`w-full text-left px-3.5 py-2.5 border-b border-slate-100 transition-colors cursor-pointer ${
+                    selectedSentEmail && selectedSentEmail.id === email.id
+                      ? 'bg-indigo-50/70'
+                      : 'hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-sm font-semibold text-slate-900 truncate">To: {email.to}</p>
+                    <div className="flex items-center gap-1.5 shrink-0 ml-3">
+                      {(email.hasAttachments || email.attachments?.length > 0) && (
+                        <PaperclipIcon className="w-3 h-3 text-slate-400" />
+                      )}
+                      <span className="text-xs text-slate-400">{email.time}</span>
+                    </div>
                   </div>
+                  <p className="text-sm font-medium text-slate-700 truncate">{email.subject}</p>
+                  <p className="text-xs text-slate-500 truncate">{email.body}</p>
+                </button>
+              ))}
+              {sentProvider === 'imap' && imapSentHasMore && (
+                <div className="px-4 py-3 border-t border-slate-100">
+                  <button
+                    onClick={onLoadMoreImapSent}
+                    disabled={imapSentLoadingMore}
+                    className="w-full py-2 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {imapSentLoadingMore ? 'Loading...' : 'Load more'}
+                  </button>
                 </div>
-                <p className="text-sm font-medium text-slate-700 truncate">{email.subject}</p>
-                <p className="text-xs text-slate-500 truncate">{email.body}</p>
-              </button>
-            ))
+              )}
+            </>
           )}
         </div>
       </div>
@@ -4762,9 +5566,15 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailIds, on
           return (
           <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
             <div className="rounded-xl border border-slate-200 p-5">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Sent Email</p>
-              <p className="text-xs text-slate-500 mb-1">To: {selectedSentEmail.to}</p>
-              <p className="text-sm font-semibold text-slate-900 mb-2">{selectedSentEmail.subject}</p>
+              <h2 className="text-lg font-bold text-slate-900 mb-3">{selectedSentEmail.subject}</h2>
+              <div className="flex items-start justify-between gap-4 mb-4 pb-4 border-b border-slate-100">
+                <div className="min-w-0">
+                  <p className="text-sm text-slate-700"><span className="font-medium">To:</span> {selectedSentEmail.to}</p>
+                </div>
+                {selectedSentEmail.time && (
+                  <span className="text-xs text-slate-400 shrink-0">{selectedSentEmail.time}</span>
+                )}
+              </div>
               {isHtml ? (
                 <div
                   className="text-sm text-slate-700 leading-relaxed prose prose-sm max-w-none"
@@ -4786,7 +5596,8 @@ function SentPage({ gmailSentEmails, outlookSentEmails, selectedSentEmailIds, on
                           selectedSentEmail.id,
                           att.attachmentId || att.id,
                           att.filename || att.name,
-                          selectedSentEmail.provider || sentProvider
+                          selectedSentEmail.provider || sentProvider,
+                          'sent'
                         )}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs text-slate-700 transition-colors cursor-pointer"
                       >
@@ -4986,6 +5797,41 @@ function SettingsPage({ darkMode, setDarkMode, signature, setSignature, useSigna
                   }`}
                 >
                   {reconnectRequiredProviders?.outlook ? 'Reconnect' : connectedAccounts.outlook ? 'Disconnect' : 'Connect'}
+                </button>
+              </div>
+            </div>
+            {/* IMAP */}
+            <div className="flex items-center justify-between p-4 rounded-xl border border-slate-200">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-slate-50 flex items-center justify-center">
+                  <svg className="w-5 h-5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">Email (IMAP)</p>
+                  <p className="text-xs text-slate-500">
+                    {connectedAccounts.imap && connectedEmails.imap
+                      ? connectedEmails.imap
+                      : 'Any IMAP-compatible account'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                {connectedAccounts.imap ? (
+                  <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-0.5 rounded-full">
+                    Connected
+                  </span>
+                ) : null}
+                <button
+                  onClick={() => connectedAccounts.imap ? onDisconnect('imap') : onConnectRequest('imap')}
+                  className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors cursor-pointer ${
+                    connectedAccounts.imap
+                      ? 'text-red-600 bg-red-50 hover:bg-red-100'
+                      : 'text-white bg-indigo-600 hover:bg-indigo-700'
+                  }`}
+                >
+                  {connectedAccounts.imap ? 'Disconnect' : 'Connect'}
                 </button>
               </div>
             </div>
