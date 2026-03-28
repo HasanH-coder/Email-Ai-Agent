@@ -8,12 +8,12 @@ const authMiddleware = require('../middleware/authMiddleware')
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } })
 
 const SUPPORTED_LANGUAGE_VARIANTS = [
-  { name: 'English', variants: ['english', 'anglais', 'ingles', 'englisch', 'ingilizce', 'الانجليزية', 'الإنجليزية'] },
-  { name: 'Arabic', variants: ['arabic', 'arabe', 'arabisch', 'arapca', 'arapça', 'العربية', 'عربي'] },
-  { name: 'Spanish', variants: ['spanish', 'espanol', 'espagnol', 'spanisch', 'ispanyolca', 'الاسبانية', 'الإسبانية', 'اسباني', 'إسباني'] },
-  { name: 'French', variants: ['french', 'francais', 'frances', 'franzosisch', 'französisch', 'fransizca', 'fransızca', 'الفرنسية', 'فرنسي', 'فرنسية'] },
-  { name: 'German', variants: ['german', 'allemand', 'aleman', 'deutsch', 'almanca', 'الالمانية', 'الألمانية', 'الماني', 'ألماني'] },
-  { name: 'Turkish', variants: ['turkish', 'turc', 'turco', 'turkce', 'türkçe', 'تركية', 'التركية', 'تركي'] },
+  { name: 'English', variants: ['english', 'anglais', 'ingles', 'englisch', 'ingilizce', 'الانجليزية', 'الإنجليزية', 'الإنجليزي', 'الانجليزي', 'إنجليزي', 'انجليزي'] },
+  { name: 'Arabic', variants: ['arabic', 'arabe', 'arabisch', 'arapca', 'arapça', 'العربية', 'عربي', 'العربي'] },
+  { name: 'Spanish', variants: ['spanish', 'espanol', 'espagnol', 'spanisch', 'ispanyolca', 'الاسبانية', 'الإسبانية', 'اسباني', 'إسباني', 'الإسباني', 'الاسباني'] },
+  { name: 'French', variants: ['french', 'francais', 'frances', 'franzosisch', 'französisch', 'fransizca', 'fransızca', 'الفرنسية', 'فرنسي', 'فرنسية', 'الفرنسي'] },
+  { name: 'German', variants: ['german', 'allemand', 'aleman', 'deutsch', 'almanca', 'الالمانية', 'الألمانية', 'الماني', 'ألماني', 'الألماني', 'الالماني'] },
+  { name: 'Turkish', variants: ['turkish', 'turc', 'turco', 'turkce', 'türkçe', 'تركية', 'التركية', 'تركي', 'التركي'] },
 ]
 
 function normalizeLanguageText(text = '') {
@@ -117,6 +117,7 @@ router.post('/generate-email', authMiddleware, async (req, res) => {
     userPrompt,
     detectedLanguage: legacyDetectedLanguage,
     detectedInputLanguage: clientInputLanguage,
+    originalEmail,
   } = req.body
 
   const detectedInputLanguage = clientInputLanguage || legacyDetectedLanguage || detectDominantLanguage(userPrompt)
@@ -137,12 +138,23 @@ router.post('/generate-email', authMiddleware, async (req, res) => {
     if (recipient) contextParts.push(`to ${recipient}`)
     if (subject) contextParts.push(`with subject "${subject}"`)
     const context = contextParts.length ? ` ${contextParts.join(' ')}` : ''
-    const userMessage = [
-      `Write a professional email${context}.`,
-      `Transcribed or typed instruction: ${userPrompt}`,
-      `Detected input language: ${detectedInputLanguage}`,
-      `Detected target output language: ${detectedOutputLanguage || 'Not explicitly requested'}`,
-    ].join('\n')
+
+    let userMessage
+    if (originalEmail) {
+      userMessage = [
+        `The user is replying to this email — From: ${originalEmail.from || ''}, Subject: ${originalEmail.subject || ''}, Body: ${originalEmail.body || ''}`,
+        `The user's instructions for the reply are: ${userPrompt}`,
+        `Detected input language: ${detectedInputLanguage}`,
+        `Detected target output language: ${detectedOutputLanguage || 'Not explicitly requested'}`,
+      ].join('\n')
+    } else {
+      userMessage = [
+        `Write a professional email${context}.`,
+        `Transcribed or typed instruction: ${userPrompt}`,
+        `Detected input language: ${detectedInputLanguage}`,
+        `Detected target output language: ${detectedOutputLanguage || 'Not explicitly requested'}`,
+      ].join('\n')
+    }
 
     const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -157,7 +169,7 @@ router.post('/generate-email', authMiddleware, async (req, res) => {
           {
             role: 'system',
             content:
-              `You are a professional email writer. The user may speak in one language and request the final email in another language. Always write the final email in the explicitly requested target language if one is provided. If no target language is explicitly requested, write in the dominant language of the user's instruction. Write ONLY the email content, nothing else. Write the email in ${finalLanguage}. Do not switch languages. Do not add any explanation. Write a complete, well-structured, professional email with proper greeting, body, and closing. Do NOT restate or summarize the instructions. Return only the email body text, no subject line, no markdown.`,
+              `You are a professional email writer. The user may write their instructions in any language and with spelling or grammar mistakes — always understand their intent and generate a perfect professional email regardless of how the prompt is written. Write the email in ${finalLanguage}. Do not switch languages. The entire email must be written in ${finalLanguage} only. Write ONLY the email content, nothing else. Do not add any explanation. Write a complete, well-structured, professional email with proper greeting, body, and closing. Do NOT restate or summarize the instructions. Return only the email body text, no subject line, no markdown.`,
           },
           { role: 'user', content: userMessage },
         ],

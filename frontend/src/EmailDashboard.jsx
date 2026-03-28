@@ -3654,6 +3654,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
           subject: `Re: ${selectedEmail.subject}`,
           userPrompt: aiPrompt.trim(),
           detectedInputLanguage: replyDetectedLanguage || detectLanguageFromText(aiPrompt.trim()),
+          originalEmail: {
+            from: selectedEmail.from || selectedEmail.fromEmail || selectedEmail.sender || '',
+            subject: selectedEmail.subject || '',
+            body: selectedEmail.bodyText || selectedEmail.preview || '',
+          },
         }),
       })
       const data = await response.json()
@@ -3849,6 +3854,11 @@ export default function EmailDashboard({ onSignOut, connectedAccountRows }) {
             subject: `Re: ${selectedEmail.subject}`,
             userPrompt: prompt,
             detectedInputLanguage: replyDetectedLanguage || detectLanguageFromText(prompt),
+            originalEmail: {
+              from: selectedEmail.from || selectedEmail.fromEmail || selectedEmail.sender || '',
+              subject: selectedEmail.subject || '',
+              body: selectedEmail.bodyText || selectedEmail.preview || '',
+            },
           }),
         })
         const data = await response.json()
