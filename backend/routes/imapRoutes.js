@@ -1,7 +1,7 @@
 const express = require('express')
 const { ImapFlow } = require('imapflow')
 const { simpleParser } = require('mailparser')
-const nodemailer = require('nodemailer')
+const { Resend } = require('resend')
 const supabaseAdmin = require('../config/supabase')
 const authMiddleware = require('../middleware/authMiddleware')
 
@@ -325,24 +325,23 @@ router.post('/send', authMiddleware, async (req, res) => {
     }))
   }
 
-  const brevoUser = process.env.BREVO_USER
-  const brevoApiKey = process.env.BREVO_API_KEY
-  if (!brevoUser || !brevoApiKey) {
-    return res.status(500).json({ message: 'SMTP relay not configured. BREVO_USER and BREVO_API_KEY must be set.' })
+  const resendApiKey = process.env.RESEND_API_KEY
+  if (!resendApiKey) {
+    return res.status(500).json({ message: 'Resend API key not configured. RESEND_API_KEY must be set.' })
   }
 
-  const transporter = nodemailer.createTransport({
-    host: 'smtp-relay.brevo.com',
-    port: 587,
-    secure: false,
-    auth: { user: brevoUser, pass: brevoApiKey },
-  })
+  const resend = new Resend(resendApiKey)
 
   try {
-    await transporter.sendMail(mailOptions)
+    await resend.emails.send({
+      from: creds.email,
+      to: mailOptions.to,
+      subject: mailOptions.subject,
+      html: mailOptions.html || mailOptions.text,
+      attachments: mailOptions.attachments,
+    })
   } catch (err) {
-    console.error('[imap] Brevo SMTP send failed', {
-      code: err.code,
+    console.error('[imap] Resend send failed', {
       message: err.message,
       from: creds.email,
     })
