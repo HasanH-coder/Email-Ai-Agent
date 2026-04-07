@@ -1,7 +1,7 @@
 const express = require('express')
 const { ImapFlow } = require('imapflow')
 const { simpleParser } = require('mailparser')
-const { Resend } = require('resend')
+const nodemailer = require('nodemailer')
 const supabaseAdmin = require('../config/supabase')
 const authMiddleware = require('../middleware/authMiddleware')
 
@@ -325,23 +325,18 @@ router.post('/send', authMiddleware, async (req, res) => {
     }))
   }
 
-  const resendApiKey = process.env.RESEND_API_KEY
-  if (!resendApiKey) {
-    return res.status(500).json({ message: 'Resend API key not configured. RESEND_API_KEY must be set.' })
-  }
-
-  const resend = new Resend(resendApiKey)
+  const transporter = nodemailer.createTransport({
+    host: creds.smtp_host,
+    port: creds.smtp_port,
+    secure: creds.smtp_port === 465,
+    auth: { user: creds.email, pass: creds.password },
+  })
 
   try {
-    await resend.emails.send({
-      from: creds.email,
-      to: mailOptions.to,
-      subject: mailOptions.subject,
-      html: mailOptions.html || mailOptions.text,
-      attachments: mailOptions.attachments,
-    })
+    await transporter.sendMail(mailOptions)
   } catch (err) {
-    console.error('[imap] Resend send failed', {
+    console.error('[imap] SMTP send failed', {
+      code: err.code,
       message: err.message,
       from: creds.email,
     })
