@@ -1,6 +1,7 @@
 const express = require('express')
 const cors = require('cors')
 const dotenv = require('dotenv')
+const net = require('net')
 
 dotenv.config()
 
@@ -31,6 +32,32 @@ app.use('/api/emails/imap', imapRoutes)
 app.use('/api/emails', emailRoutes)
 app.use('/api/ai', aiRoutes)
 app.use('/api', logoRoutes)
+
+app.get('/api/test-smtp', (req, res) => {
+  const host = 'mail.rodistogo.net'
+  const port = 465
+  const TIMEOUT_MS = 5000
+  const socket = new net.Socket()
+  let settled = false
+
+  const finish = (result) => {
+    if (settled) return
+    settled = true
+    socket.destroy()
+    res.json(result)
+  }
+
+  socket.setTimeout(TIMEOUT_MS)
+  socket.connect(port, host, () => {
+    finish({ ok: true, message: `TCP connection to ${host}:${port} succeeded.` })
+  })
+  socket.on('timeout', () => {
+    finish({ ok: false, message: `TCP connection to ${host}:${port} timed out after ${TIMEOUT_MS}ms.` })
+  })
+  socket.on('error', (err) => {
+    finish({ ok: false, message: `TCP connection to ${host}:${port} failed: ${err.message}` })
+  })
+})
 
 app.use(errorHandler)
 
